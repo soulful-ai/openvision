@@ -2,9 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- Raise the jetsam memory ceiling so the on-device Gemma 4 VLM (~3.6 GB) plus the
-         vision encoder can run without being killed under memory pressure. -->
-    <key>com.apple.developer.kernel.increased-memory-limit</key>
-    <true/>
+    <!-- increased-memory-limit entitlement removed 2026-08-14 for the DAT capture test build:
+         it blocked the auto-provisioning profile, and the on-device Gemma VLM path is unused
+         (backend = brain.intch.cc). Restore if local MLX models are needed. -->
 </dict>
 </plist>
