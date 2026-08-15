@@ -1,8 +1,12 @@
 // OpenVision - OpenAIService.swift
 // Cloud backend for the OpenAI Chat Completions API (and any OpenAI-compatible endpoint).
 //
-// Simple request/response (non-streaming) — reliable for validating the cloud command + vision
-// path. Supports text and images (base64 data URL). The reply is delivered via `onAgentMessage`,
+// Streams by default (`stream: true`): text deltas are forwarded through `onPartialResponse` as
+// they arrive, so the UI fills in and TTS starts speaking the first sentence while the model is
+// still writing. A buffered request/response path remains and is used automatically when the
+// endpoint can't serve SSE (or when the user turns streaming off in Settings → OpenAI).
+//
+// Supports text and images (base64 data URL). The final reply is delivered via `onAgentMessage`,
 // matching the other backends so VoiceAgentView can wire it up the same way.
 
 import Foundation
@@ -17,8 +21,19 @@ final class OpenAIService: ObservableObject {
     var onAgentMessage: ((String) -> Void)?
     /// Called when processing starts/stops (drives the thinking/listening state).
     var onProcessingChanged: ((Bool) -> Void)?
+    /// Called with the reply built so far while it streams — CUMULATIVE text, not a delta, to
+    /// match `GemmaLocalService.onPartialResponse` so the view model's sentence-pipelining TTS
+    /// (`feedStreamingSpeech`) works identically for both. Only fired for plain text answers;
+    /// a response that turns out to be a tool call never emits partials.
+    var onPartialResponse: ((String) -> Void)?
 
     @Published private(set) var isConnected = false
+
+    /// Base URL that was found not to serve SSE. Remembered so a gateway without streaming
+    /// degrades to the (still correct) buffered path instead of failing every turn — and so
+    /// pointing the app at a different endpoint re-tests streaming rather than inheriting the
+    /// verdict from the old one.
+    private var streamingUnsupportedForBaseURL: String?
 
     private var settings: AppSettings { SettingsManager.shared.settings }
 
@@ -91,12 +106,20 @@ final class OpenAIService: ObservableObject {
 
         let maxIterations = 4
         for _ in 0..<maxIterations {
-            let body: [String: Any] = [
+            // Stream when enabled and the endpoint supports it: the reply renders (and starts
+            // being spoken) token-by-token instead of after the whole generation. The buffered
+            // path stays as the fallback, and both produce the same assistant-message dict so the
+            // tool-calling loop below is untouched by the choice.
+            let useStreaming = settings.openAIStreamResponses
+                && streamingUnsupportedForBaseURL != settings.openAIBaseURL
+            var body: [String: Any] = [
                 "model": settings.openAIModel,
                 "messages": messages,
                 "tools": tools,
                 "max_tokens": 400
             ]
+            if useStreaming { body["stream"] = true }
+
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -104,14 +127,22 @@ final class OpenAIService: ObservableObject {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             request.timeoutInterval = 60
 
-            let (data, response) = try await Self.dataWithRetry(for: request)
-            guard let http = response as? HTTPURLResponse else { throw OpenAIError.noResponse }
-            guard (200...299).contains(http.statusCode) else {
-                let detail = Self.errorMessage(from: data) ?? "HTTP \(http.statusCode)"
-                NSLog("[OpenAI] request failed: %@", detail)
-                throw OpenAIError.api(detail)
+            var message: [String: Any]
+            if useStreaming {
+                do {
+                    message = try await streamAssistantMessage(request: request)
+                } catch OpenAIError.streamingUnavailable(let why) {
+                    // Endpoint answered but not with SSE (older gateway, proxy that buffers).
+                    // Retry this same turn buffered and stop asking for streams this run.
+                    NSLog("[OpenAI] streaming unavailable (%@) — falling back to buffered", why)
+                    streamingUnsupportedForBaseURL = settings.openAIBaseURL
+                    body.removeValue(forKey: "stream")
+                    request.httpBody = try JSONSerialization.data(withJSONObject: body)
+                    message = try await bufferedAssistantMessage(request: request)
+                }
+            } else {
+                message = try await bufferedAssistantMessage(request: request)
             }
-            guard let message = Self.firstMessage(from: data) else { throw OpenAIError.emptyReply }
 
             // Tool calls → execute (web_search or a native tool), feed results back, loop.
             if let toolCalls = message["tool_calls"] as? [[String: Any]], !toolCalls.isEmpty {
@@ -162,6 +193,130 @@ final class OpenAIService: ObservableObject {
         return parts.joined(separator: "\n\n")
     }
 
+    // MARK: - One round trip (buffered)
+
+    /// Classic request/response: read the whole body, return the assistant message dict.
+    private func bufferedAssistantMessage(request: URLRequest) async throws -> [String: Any] {
+        let (data, response) = try await Self.dataWithRetry(for: request)
+        guard let http = response as? HTTPURLResponse else { throw OpenAIError.noResponse }
+        guard (200...299).contains(http.statusCode) else {
+            let detail = Self.errorMessage(from: data) ?? "HTTP \(http.statusCode)"
+            NSLog("[OpenAI] request failed: %@", detail)
+            throw OpenAIError.api(detail)
+        }
+        guard let message = Self.firstMessage(from: data) else { throw OpenAIError.emptyReply }
+        return message
+    }
+
+    // MARK: - One round trip (streamed)
+
+    /// Read an SSE stream (`stream: true`) and reassemble it into the same assistant-message dict
+    /// the buffered path returns, so the caller's tool-calling loop can't tell the difference.
+    ///
+    /// Two kinds of delta arrive on `choices[0].delta`:
+    /// - `content` — plain text, appended and forwarded to `onPartialResponse` as it grows.
+    /// - `tool_calls` — an array of partial calls keyed by `index`; `id`/`function.name` arrive
+    ///   once and `function.arguments` arrives as a JSON string in fragments that must be
+    ///   concatenated in order before they parse.
+    ///
+    /// Partial text is only forwarded when the response is NOT a tool call. OpenAI commits to one
+    /// or the other in the first delta, so checking whether a tool-call delta has been seen is
+    /// enough to keep the app from speaking a preamble that gets discarded a moment later.
+    private func streamAssistantMessage(request: URLRequest) async throws -> [String: Any] {
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else { throw OpenAIError.noResponse }
+
+        guard (200...299).contains(http.statusCode) else {
+            // Drain the (small) error body so the message is as useful as the buffered path's.
+            var raw = Data()
+            for try await byte in bytes { raw.append(byte) }
+            let detail = Self.errorMessage(from: raw) ?? "HTTP \(http.statusCode)"
+            // 400s naming the parameter mean "this endpoint has no streaming", not "bad request".
+            if http.statusCode == 400 && detail.lowercased().contains("stream") {
+                throw OpenAIError.streamingUnavailable(detail)
+            }
+            NSLog("[OpenAI] stream request failed: %@", detail)
+            throw OpenAIError.api(detail)
+        }
+
+        // A server that answers 200 with plain JSON ignored `stream: true`. Salvage it as a
+        // buffered reply rather than failing the turn.
+        let contentType = (http.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
+        guard contentType.contains("event-stream") else {
+            var raw = Data()
+            for try await byte in bytes { raw.append(byte) }
+            if let message = Self.firstMessage(from: raw) { return message }
+            throw OpenAIError.streamingUnavailable("content-type \(contentType.isEmpty ? "missing" : contentType)")
+        }
+
+        var content = ""
+        var toolCalls: [Int: ToolCallAccumulator] = [:]
+        var sawToolCallDelta = false
+        var sawAnyFrame = false
+
+        for try await line in bytes.lines {
+            guard line.hasPrefix("data:") else { continue }   // skip ":" comments and blank lines
+            let payload = line.dropFirst("data:".count).trimmingCharacters(in: .whitespaces)
+            if payload == "[DONE]" { sawAnyFrame = true; break }
+            guard let frame = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any] else { continue }
+            sawAnyFrame = true
+
+            // An error can arrive mid-stream (rate limit, context overflow) with a 200 header.
+            if let error = frame["error"] as? [String: Any], let msg = error["message"] as? String {
+                throw OpenAIError.api(msg)
+            }
+
+            guard let delta = (frame["choices"] as? [[String: Any]])?.first?["delta"] as? [String: Any] else { continue }
+
+            if let calls = delta["tool_calls"] as? [[String: Any]] {
+                sawToolCallDelta = true
+                for call in calls {
+                    let index = call["index"] as? Int ?? 0
+                    var accumulator = toolCalls[index] ?? ToolCallAccumulator()
+                    if let id = call["id"] as? String, !id.isEmpty { accumulator.id = id }
+                    if let function = call["function"] as? [String: Any] {
+                        if let name = function["name"] as? String, !name.isEmpty { accumulator.name = name }
+                        if let arguments = function["arguments"] as? String { accumulator.arguments += arguments }
+                    }
+                    toolCalls[index] = accumulator
+                }
+            }
+
+            if let chunk = delta["content"] as? String, !chunk.isEmpty {
+                content += chunk
+                if !sawToolCallDelta { onPartialResponse?(content) }
+            }
+        }
+
+        guard sawAnyFrame else { throw OpenAIError.streamingUnavailable("no SSE frames") }
+
+        var message: [String: Any] = ["role": "assistant"]
+        if !toolCalls.isEmpty {
+            message["tool_calls"] = toolCalls.keys.sorted().map { toolCalls[$0]!.asDictionary() }
+            // The API requires `content` present (null is fine) alongside tool_calls on the turn
+            // that gets echoed back; an empty string keeps JSONSerialization simple and is accepted.
+            message["content"] = content
+        } else {
+            message["content"] = content
+        }
+        return message
+    }
+
+    /// Partial tool call being reassembled from stream deltas.
+    private struct ToolCallAccumulator {
+        var id: String = ""
+        var name: String = ""
+        var arguments: String = ""
+
+        func asDictionary() -> [String: Any] {
+            [
+                "id": id,
+                "type": "function",
+                "function": ["name": name, "arguments": arguments.isEmpty ? "{}" : arguments]
+            ]
+        }
+    }
+
     // MARK: - Response parsing
 
     /// Chat Completions can drop a keep-alive connection between the multiple round-trips of a
@@ -199,6 +354,9 @@ final class OpenAIService: ObservableObject {
 
     enum OpenAIError: LocalizedError {
         case notConfigured, badURL, noResponse, emptyReply, api(String)
+        /// The endpoint accepted the request but didn't stream — internal signal to retry
+        /// buffered, never surfaced to the user.
+        case streamingUnavailable(String)
         var errorDescription: String? {
             switch self {
             case .notConfigured: return "OpenAI isn't configured. Add your API key in Settings → OpenAI."
@@ -206,6 +364,7 @@ final class OpenAIService: ObservableObject {
             case .noResponse: return "No response from OpenAI."
             case .emptyReply: return "OpenAI returned an empty reply."
             case .api(let detail): return "OpenAI error: \(detail)"
+            case .streamingUnavailable(let why): return "Streaming unavailable (\(why))."
             }
         }
     }

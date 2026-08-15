@@ -58,6 +58,22 @@ struct OpenAISettingsView: View {
                 Text("Default is OpenAI. Point this at any OpenAI-compatible API (OpenRouter, a local server, etc.). No trailing slash.")
             }
 
+            // Streaming
+            Section {
+                Toggle(isOn: $settingsManager.settings.openAIStreamResponses) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Stream Replies")
+                        Text("Speak and show the answer as it's generated")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            } header: {
+                Text("Streaming")
+            } footer: {
+                Text("Sends stream: true so the reply arrives token-by-token — the assistant starts speaking the first sentence while the rest is still being written. If your endpoint doesn't support SSE the app detects it and falls back automatically.")
+            }
+
             // Help
             Section {
                 Link(destination: URL(string: "https://platform.openai.com/api-keys")!) {

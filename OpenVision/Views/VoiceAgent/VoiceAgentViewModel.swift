@@ -660,6 +660,15 @@ final class VoiceAgentViewModel: ObservableObject {
             if self.usingAppleTTS { self.feedStreamingSpeech(partial, isFinal: false) }
         }
 
+        // OpenAI extra: SSE token streaming, same contract as Gemma's (cumulative text). Lets the
+        // cloud backend start speaking the first sentence while the rest is still generating.
+        OpenAIService.shared.onPartialResponse = { [weak self] (partial: String) in
+            guard let self else { return }
+            guard self.isSessionActive || self.isLiveVideoMode else { return }
+            self.aiTranscript = partial
+            if self.usingAppleTTS { self.feedStreamingSpeech(partial, isFinal: false) }
+        }
+
         // OpenClaw extras: tool status + device-side tool calls.
         OpenClawService.shared.onToolStatusChanged = { [weak self] (toolName: String?, isRunning: Bool) in
             guard let self else { return }
@@ -1543,8 +1552,15 @@ final class VoiceAgentViewModel: ObservableObject {
     /// True when the active speech engine is Apple's system voice (not Kokoro). Apple TTS runs on
     /// a system audio service — not the Metal GPU — so it can pipeline speech while the on-device
     /// model is still generating, with no resource contention.
-    private var usingAppleTTS: Bool {
-        !(settingsManager.settings.ttsEngine == .kokoro && KokoroTTSService.shared.isModelReady)
+    private var usingAppleTTS: Bool { !usingKokoroTTS }
+
+    /// Kokoro speaks only when it is selected, downloaded, AND can pronounce the app's language —
+    /// it is English-only (see `KokoroTTSService.supportedLanguageCodes`). Without the language
+    /// check a Russian reply would be handed to an English phonemizer and come out as noise.
+    private var usingKokoroTTS: Bool {
+        settingsManager.settings.ttsEngine == .kokoro
+            && KokoroTTSService.shared.isModelReady
+            && KokoroTTSService.supportsCurrentLanguage
     }
 
     /// Feed the streamed reply to Apple TTS sentence-by-sentence. `cumulative` is the full text so
@@ -1587,8 +1603,9 @@ final class VoiceAgentViewModel: ObservableObject {
     private func speakResponse(_ text: String) {
         guard !text.isEmpty else { return }
         recordAssistantReply(text)
-        // Kokoro (on-device neural) when selected + ready; otherwise the Apple system voice.
-        if settingsManager.settings.ttsEngine == .kokoro && KokoroTTSService.shared.isModelReady {
+        // Kokoro (on-device neural) when selected, ready, and able to speak the language;
+        // otherwise the Apple system voice, which covers every language in the picker.
+        if usingKokoroTTS {
             Task { await KokoroTTSService.shared.speak(text, voice: settingsManager.settings.kokoroVoice) }
         } else {
             ttsService.speak(text)

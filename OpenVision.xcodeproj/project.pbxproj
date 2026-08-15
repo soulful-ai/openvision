@@ -33,6 +33,7 @@
 		49DFBFFE52D341E96BCE382E /* AppleFoundationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7B97C063C947F53F6E209D1 /* AppleFoundationService.swift */; };
 		4DFF630E56769253493B4B57 /* NotificationForegroundPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4831CE885B0320D9CAD71736 /* NotificationForegroundPresenter.swift */; };
 		52E3A16AB6227CDA3D67817D /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2FD4A9B156D92B468B28864 /* AppSettings.swift */; };
+		5A1C0E7B4F2D81A609B3D411 /* SpeechLocale.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1C0E7B4F2D81A609B3D410 /* SpeechLocale.swift */; };
 		53B484EF0A2017B9718AC548 /* WebSearchSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71ACC88CE5E9E799ED607853 /* WebSearchSettingsView.swift */; };
 		53C17BBA774E7D3D4E295584 /* LocalAgent.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEE6F61B22736F87248FD0F5 /* LocalAgent.swift */; };
 		5652332DECCFA2D845F25A8C /* NativeTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA6DC62CBCB893C9A9922686 /* NativeTool.swift */; };
@@ -163,6 +164,7 @@
 		ADCFF581A7AE50FBF35EA257 /* GeminiLiveService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeminiLiveService.swift; sourceTree = "<group>"; };
 		B2B78D6C28BEFF1F8426997C /* AudioCaptureService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioCaptureService.swift; sourceTree = "<group>"; };
 		B2FD4A9B156D92B468B28864 /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
+		5A1C0E7B4F2D81A609B3D410 /* SpeechLocale.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechLocale.swift; sourceTree = "<group>"; };
 		BDBE980F673E3077B58977E5 /* AppleNativeTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleNativeTools.swift; sourceTree = "<group>"; };
 		BE4D7E31C137C29246EB9281 /* NativeToolSupportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeToolSupportTests.swift; sourceTree = "<group>"; };
 		BE848862D72446F7BBDD3D89 /* KokoroTTSService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KokoroTTSService.swift; sourceTree = "<group>"; };
@@ -252,6 +254,7 @@
 			children = (
 				B2FD4A9B156D92B468B28864 /* AppSettings.swift */,
 				6188DD26571BACB30096654D /* Conversation.swift */,
+				5A1C0E7B4F2D81A609B3D410 /* SpeechLocale.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -737,6 +740,7 @@
 				3D871EEF1178A47F4999C7F2 /* AdditionalInstructionsView.swift in Sources */,
 				6878487E101CAC3A8BF651E9 /* AnimatedBackground.swift in Sources */,
 				52E3A16AB6227CDA3D67817D /* AppSettings.swift in Sources */,
+				5A1C0E7B4F2D81A609B3D411 /* SpeechLocale.swift in Sources */,
 				49DFBFFE52D341E96BCE382E /* AppleFoundationService.swift in Sources */,
 				3CEB0ABE3CA96726C9FC7C3F /* AppleIntelligenceSettingsView.swift in Sources */,
 				DCA893B0F4EB539CA4C1EC00 /* AppleNativeTools.swift in Sources */,

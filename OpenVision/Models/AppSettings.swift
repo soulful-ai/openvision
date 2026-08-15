@@ -92,6 +92,11 @@ struct AppSettings: Codable, Equatable {
     /// server, Azure-style gateways, etc.). No trailing slash.
     var openAIBaseURL: String = "https://api.openai.com/v1"
 
+    /// Stream chat replies token-by-token (`stream: true`) so text renders and TTS starts speaking
+    /// while the model is still generating. Turn off for endpoints that mishandle SSE — the app
+    /// also detects that on its own and falls back to a buffered request.
+    var openAIStreamResponses: Bool = true
+
     /// Realtime model id used for live audio + video mode (GA gpt-realtime).
     var openAIRealtimeModel: String = "gpt-realtime"
 
@@ -127,6 +132,11 @@ struct AppSettings: Codable, Equatable {
 
     /// Conversation timeout in seconds (auto-end after silence)
     var conversationTimeout: TimeInterval = 30
+
+    /// Language the app listens in and speaks in, as a BCP-47 identifier ("ru-RU", "nl-NL", …).
+    /// Empty string (the default) means "follow the device locale". Resolved through
+    /// `SpeechLocale`, which snaps it to a locale Speech/AVFoundation actually support.
+    var speechLocaleIdentifier: String = ""
 
     /// Selected TTS voice identifier for the Apple system voice (nil = system default)
     var selectedVoiceIdentifier: String? = nil

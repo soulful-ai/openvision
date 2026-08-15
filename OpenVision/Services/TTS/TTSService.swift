@@ -39,15 +39,27 @@ final class TTSService: NSObject, ObservableObject {
 
     // MARK: - Voice Selection
 
+    /// The voice to speak with, for the language the app is configured for (`SpeechLocale`).
+    ///
+    /// A pinned voice only wins when it speaks that language. Otherwise it is ignored: a user who
+    /// once picked "Samantha" and later switched the app to Russian would otherwise hear Cyrillic
+    /// read by an American English voice — unintelligible. Falling back to the best installed
+    /// voice for the language is always the more useful answer.
     private var selectedVoice: AVSpeechSynthesisVoice? {
-        // Check if user has selected a specific voice
+        let languageTag = SpeechLocale.voiceLanguageTag
+        let languageCode = SpeechLocale.voiceLanguageCode
+
         if let identifier = SettingsManager.shared.settings.selectedVoiceIdentifier,
-           let voice = AVSpeechSynthesisVoice(identifier: identifier) {
+           let voice = AVSpeechSynthesisVoice(identifier: identifier),
+           SpeechLocale.languageCode(of: SpeechLocale.normalized(voice.language)) == languageCode {
             return voice
         }
 
-        // Fall back to default English voice
-        return AVSpeechSynthesisVoice(language: "en-US")
+        // Best installed voice for the language (premium → enhanced → default), then the plain
+        // language lookup, then English so we always hand the synthesizer *something*.
+        return SpeechLocale.bestVoice(forLanguageTag: languageTag)
+            ?? AVSpeechSynthesisVoice(language: languageTag)
+            ?? AVSpeechSynthesisVoice(language: "en-US")
     }
 
     /// Get all available voices for a language

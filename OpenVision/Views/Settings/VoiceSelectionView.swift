@@ -155,7 +155,9 @@ struct VoiceSelectionView: View {
     // MARK: - Actions
 
     private func loadVoices() {
-        voices = TTSService.availableVoices(for: "en")
+        // Voices for the language the app is set to — listing English voices while the assistant
+        // replies in Russian is how you end up with Cyrillic read in an American accent.
+        voices = TTSService.availableVoices(for: SpeechLocale.voiceLanguageCode)
     }
 
     private func selectVoice(identifier: String?) {
@@ -166,13 +168,16 @@ struct VoiceSelectionView: View {
         isTestingVoice = true
         testingVoiceId = identifier
 
-        let utterance = AVSpeechUtterance(string: "Hello! This is how I sound. I'm your AI assistant.")
+        let languageCode = SpeechLocale.voiceLanguageCode
+        let utterance = AVSpeechUtterance(string: SpeechLocale.sampleUtterance(forLanguageCode: languageCode))
 
         if let identifier = identifier,
            let voice = AVSpeechSynthesisVoice(identifier: identifier) {
             utterance.voice = voice
         } else {
-            utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+            // "System Default" row: preview what speaking will actually use for this language.
+            utterance.voice = SpeechLocale.bestVoice(forLanguageTag: SpeechLocale.voiceLanguageTag)
+                ?? AVSpeechSynthesisVoice(language: "en-US")
         }
 
         let synthesizer = AVSpeechSynthesizer()

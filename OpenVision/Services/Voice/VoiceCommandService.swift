@@ -84,7 +84,27 @@ final class VoiceCommandService: ObservableObject {
 
     // MARK: - Speech Recognition
 
-    private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+    /// Recognizer for the language the user selected (Settings → Voice Control → Language).
+    ///
+    /// Was hard-coded to en-US, which silently made the app monolingual: a Russian speaker's
+    /// "покажи, что ты видишь" came back as English-phoneme mush and no command ever matched.
+    /// `SFSpeechRecognizer`'s locale is fixed at init, so a language change means building a new
+    /// instance — hence the cached-by-identifier accessor rather than a stored `let`.
+    private var cachedRecognizer: SFSpeechRecognizer?
+    private var cachedRecognizerLocaleID: String?
+
+    private var speechRecognizer: SFSpeechRecognizer? {
+        let locale = SpeechLocale.recognizerLocale
+        if let cachedRecognizer, cachedRecognizerLocaleID == locale.identifier {
+            return cachedRecognizer
+        }
+        let recognizer = SFSpeechRecognizer(locale: locale)
+        cachedRecognizer = recognizer
+        cachedRecognizerLocaleID = locale.identifier
+        print("[VoiceCommand] Recognizer locale: \(locale.identifier) (available: \(recognizer?.isAvailable ?? false))")
+        return recognizer
+    }
+
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
 
@@ -233,9 +253,26 @@ final class VoiceCommandService: ObservableObject {
     private func configureRecognitionRequest(_ request: SFSpeechAudioBufferRecognitionRequest) {
         request.shouldReportPartialResults = true
         request.taskHint = .search
-        var phrases = ["Ok Vision", "Okay Vision", "Hey Vision", "Vision"]
+        // The English variants only help an English recognizer — feeding "Okay Vision" to a
+        // Russian model just biases it toward transliterating noise. Outside English, bias on the
+        // user's own wake phrase alone (they can set a Cyrillic one, e.g. "Окей Вижн").
+        var phrases: [String] = SpeechLocale.isEnglish
+            ? ["Ok Vision", "Okay Vision", "Hey Vision", "Vision"]
+            : []
         if !wakeWord.isEmpty { phrases.insert(wakeWord, at: 0) }
         request.contextualStrings = phrases
+    }
+
+    /// Apply a language change from Settings. The recognizer's locale is immutable, so an active
+    /// listening session has to be torn down and relaunched to start hearing the new language.
+    func applyLocaleChange() {
+        let newLocale = SpeechLocale.recognizerLocale
+        guard cachedRecognizerLocaleID != newLocale.identifier else { return }
+        cachedRecognizer = nil
+        cachedRecognizerLocaleID = nil
+        guard isListening else { return }
+        print("[VoiceCommand] Language changed → restarting recognizer as \(newLocale.identifier)")
+        restartRecognition()
     }
 
     /// SFSpeechRecognizer stops after ~1 minute or when it emits a final result / errors. While
@@ -557,7 +594,16 @@ final class VoiceCommandService: ObservableObject {
         guard detectWakeWord(in: text, bypassCooldown: true) else { return false }
         let lower = text.lowercased()
         if lower.contains("video") || lower.contains("stream") { return false }
-        let stopWords = ["stop", "be quiet", "shut up", "silence", "quiet", "enough", "cancel"]
+        var stopWords = ["stop", "be quiet", "shut up", "silence", "quiet", "enough", "cancel"]
+        // The English words stay in every language (they cost nothing and the recognizer can emit
+        // them for loanwords); the target language's own stop words are what actually get said.
+        switch SpeechLocale.voiceLanguageCode {
+        case "ru": stopWords += ["стоп", "хватит", "тихо", "замолчи", "отмена", "перестань"]
+        case "uk": stopWords += ["стоп", "досить", "тихо", "замовкни", "скасувати", "припини"]
+        case "nl": stopWords += ["stop", "stil", "hou op", "genoeg", "annuleer"]
+        case "es": stopWords += ["para", "basta", "silencio", "cállate", "cancela"]
+        default: break
+        }
         return stopWords.contains { lower.contains($0) }
     }
 

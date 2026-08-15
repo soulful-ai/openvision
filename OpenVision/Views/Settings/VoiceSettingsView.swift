@@ -16,13 +16,65 @@ struct VoiceSettingsView: View {
               let voice = AVSpeechSynthesisVoice(identifier: identifier) else {
             return "System Default"
         }
+        // A voice pinned in another language is ignored at speak time (TTSService picks the best
+        // voice for the current language instead) — say so here rather than showing a stale name.
+        guard SpeechLocale.languageCode(of: SpeechLocale.normalized(voice.language)) == SpeechLocale.voiceLanguageCode else {
+            return "Auto (\(voice.name) is \(voice.language))"
+        }
         return voice.name
+    }
+
+    /// Resolved language tag actually in use — the picked one, or the device's when set to Device.
+    private var resolvedLanguageTag: String { SpeechLocale.recognizerLocale.identifier }
+
+    private var isRecognitionAvailable: Bool {
+        SpeechLocale.isRecognitionAvailable(for: SpeechLocale.configured)
+    }
+
+    private var recognitionStatus: String {
+        isRecognitionAvailable ? "Ready · \(resolvedLanguageTag)" : "Unavailable · \(resolvedLanguageTag)"
+    }
+
+    private var languageFooter: String {
+        var text = "Sets the language the assistant listens in and speaks. \"Device Language\" follows your iPhone's language (\(resolvedLanguageTag))."
+        if !isRecognitionAvailable {
+            text += " iOS has no speech recognizer for this language on this device — try another, or install the language in iOS Settings → General → Keyboard → Dictation Languages."
+        }
+        if !KokoroTTSService.supportsCurrentLanguage {
+            text += " Kokoro speaks English only, so this language uses the Apple system voice."
+        }
+        return text
     }
 
     // MARK: - Body
 
     var body: some View {
         Form {
+            // Language Section — governs BOTH speech recognition and the TTS voice.
+            Section {
+                Picker("Language", selection: $settingsManager.settings.speechLocaleIdentifier) {
+                    ForEach(SpeechLocale.options) { option in
+                        Text(option.displayName).tag(option.id)
+                    }
+                }
+                .onChange(of: settingsManager.settings.speechLocaleIdentifier) { _, _ in
+                    // SFSpeechRecognizer's locale is fixed at init — relaunch it on the new one.
+                    VoiceCommandService.shared.applyLocaleChange()
+                }
+
+                HStack {
+                    Text("Recognition")
+                    Spacer()
+                    Text(recognitionStatus)
+                        .font(.caption)
+                        .foregroundColor(isRecognitionAvailable ? .green : .orange)
+                }
+            } header: {
+                Text("Language")
+            } footer: {
+                Text(languageFooter)
+            }
+
             // Wake Word Section
             Section {
                 Toggle(isOn: $settingsManager.settings.wakeWordEnabled) {
@@ -88,11 +140,16 @@ struct VoiceSettingsView: View {
             Section {
                 Picker("Speech Engine", selection: $settingsManager.settings.ttsEngine) {
                     ForEach(TTSEngineType.allCases) { engine in
-                        Text(engine.displayName).tag(engine)
+                        // Kokoro is English-only; label it so the picker doesn't promise a voice
+                        // it can't deliver in Russian/Dutch/Spanish/Ukrainian.
+                        Text(engine == .kokoro && !KokoroTTSService.supportsCurrentLanguage
+                             ? "\(engine.displayName) — English only"
+                             : engine.displayName)
+                            .tag(engine)
                     }
                 }
 
-                if settingsManager.settings.ttsEngine == .appleSystem {
+                if settingsManager.settings.ttsEngine == .appleSystem || !KokoroTTSService.supportsCurrentLanguage {
                     NavigationLink {
                         VoiceSelectionView()
                     } label: {
@@ -123,10 +180,12 @@ struct VoiceSettingsView: View {
             } header: {
                 Text("Output Voice")
             } footer: {
-                if settingsManager.settings.ttsEngine == .kokoro {
-                    Text("Kokoro is a natural, on-device neural voice — private and offline. Download its model (~600 MB) under Kokoro Model, then it runs entirely on-device.")
+                if settingsManager.settings.ttsEngine == .kokoro && !KokoroTTSService.supportsCurrentLanguage {
+                    Text("Kokoro can only pronounce English, so replies in \(resolvedLanguageTag) are spoken by the Apple system voice instead. Switch the language to English to use Kokoro.")
+                } else if settingsManager.settings.ttsEngine == .kokoro {
+                    Text("Kokoro is a natural, on-device neural voice — private and offline. Download its model (~600 MB) under Kokoro Model, then it runs entirely on-device. English only.")
                 } else {
-                    Text("Apple's built-in system voice. For higher quality, download a Premium/Enhanced voice in iOS Settings → Accessibility → Spoken Content.")
+                    Text("Apple's built-in system voice, available in every language above. For higher quality, download a Premium/Enhanced voice in iOS Settings → Accessibility → Spoken Content.")
                 }
             }
 

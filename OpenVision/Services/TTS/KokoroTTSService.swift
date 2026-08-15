@@ -30,6 +30,29 @@ final class KokoroTTSService: ObservableObject {
         "bf_emma", "bf_isabella", "bm_george", "bm_lewis"
     ]
 
+    /// Languages this engine can actually pronounce — **English only**, and that is a property of
+    /// the build, not a shortlist we chose:
+    ///
+    /// 1. `KokoroSwift.Language` (Vendor/kokoro-ios/.../Language.swift) has exactly three cases:
+    ///    `none`, `enUS`, `enGB`. There is no way to *ask* the engine for Russian.
+    /// 2. Its grapheme-to-phoneme stage is MisakiSwift, whose only sources are under
+    ///    `Sources/MisakiSwift/English/`. The multilingual eSpeak NG processor exists in the
+    ///    vendored source but is compiled out (`#if canImport(eSpeakNGLib)`, and no Package.swift
+    ///    here links eSpeakNGLib), so Cyrillic text has no phonemizer at all.
+    /// 3. Upstream Kokoro-82M ships no Russian voice pack either — the prefixes are a/b (English),
+    ///    e (Spanish), f (French), h (Hindi), i (Italian), j (Japanese), p (Portuguese),
+    ///    z (Mandarin). Russian is simply not in the model.
+    ///
+    /// So for any non-English language the app must fall back to AVSpeechSynthesizer; callers
+    /// gate on `supportsCurrentLanguage` rather than assuming Kokoro is always eligible.
+    static let supportedLanguageCodes: Set<String> = ["en"]
+
+    /// Whether Kokoro can speak the language the app is currently set to.
+    @MainActor
+    static var supportsCurrentLanguage: Bool {
+        supportedLanguageCodes.contains(SpeechLocale.voiceLanguageCode)
+    }
+
     private var storageDir: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("KokoroTTS", isDirectory: true)
