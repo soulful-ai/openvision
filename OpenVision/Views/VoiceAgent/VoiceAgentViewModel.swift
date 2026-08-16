@@ -742,9 +742,12 @@ final class VoiceAgentViewModel: ObservableObject {
         let lowerCommand = command.lowercased()
 
         // Check for "stop" command - stops TTS and waits for next command
-        let stopKeywords = ["stop", "be quiet", "shut up", "silence", "quiet", "enough", "ok stop", "okay stop"]
+        let stopKeywords = ["stop", "be quiet", "shut up", "silence", "quiet", "enough", "ok stop", "okay stop",
+                            // ru-RU STT hears Cyrillic — Russian stop words (Margo, 2026-08-16)
+                            "стоп", "хватит", "замолчи", "тихо", "остановись", "перестань", "прекрати", "молчи", "достаточно"]
         let isStopCommand = stopKeywords.contains { lowerCommand.contains($0) } &&
                            !lowerCommand.contains("video") && !lowerCommand.contains("stream")
+                           && !lowerCommand.contains("видео") && !lowerCommand.contains("стрим")
 
         if isStopCommand {
             print("[VoiceAgent] Stop command detected - full stop")
@@ -754,14 +757,19 @@ final class VoiceAgentViewModel: ObservableObject {
 
         // Check for live video mode commands
         let startLiveKeywords = ["start video stream", "start live video", "start video", "start streaming",
-                                 "enable video", "live mode", "go live", "video mode"]
+                                 "enable video", "live mode", "go live", "video mode",
+                                 // ru-RU STT (Apple) transcribes Cyrillic — accept Russian equivalents.
+                                 "начни видео", "включи видео", "запусти видео", "старт видео", "видео режим",
+                                 "лайв режим", "живой режим", "видео стрим", "включи стрим", "начни стрим"]
 
         let isStartLiveCommand = startLiveKeywords.contains { lowerCommand.contains($0) }
         // Fuzzy stop match: any "video"/"stream" phrase with a stop-like word. Tolerates Apple STT
         // dropping the leading 's' ("stop video" → "top video"), which previously sailed past the
         // exact-keyword list and got sent to the model as a question instead of ending the mode.
         let mentionsVideo = lowerCommand.contains("video") || lowerCommand.contains("stream")
-        let stopWords = ["stop", "top ", "end ", "exit", "disable", "close", "quit", "turn off"]
+            || lowerCommand.contains("видео") || lowerCommand.contains("стрим")
+        let stopWords = ["stop", "top ", "end ", "exit", "disable", "close", "quit", "turn off",
+                         "стоп", "останови", "выключи", "заверши", "закрой", "хватит"]
         let isStopLiveCommand = mentionsVideo && stopWords.contains { lowerCommand.contains($0) }
 
         // Handle live video mode commands
@@ -1132,6 +1140,7 @@ final class VoiceAgentViewModel: ObservableObject {
                 let lowerText = text.lowercased()
                 let stopKeywords = ["stop video", "stop streaming", "stop live", "end video",
                                    "exit video", "disable video", "stop the video", "end live",
+                                   "стоп видео", "выключи видео", "останови видео", "заверши видео", "стоп стрим", "выключи стрим",
                                    // Hindi fallbacks (models sometimes transcribe English as Hindi)
                                    "स्टॉप", "वीडियो बंद", "बंद करो", "रुको"]
 

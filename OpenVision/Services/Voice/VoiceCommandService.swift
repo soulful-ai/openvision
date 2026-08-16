@@ -504,7 +504,7 @@ final class VoiceCommandService: ObservableObject {
         case .listening, .conversationMode:
             // Strip wake word from transcription (like xmeta does)
             var command = transcription
-            for ww in [wakeWord.lowercased(), "ok vision", "okay vision", "hey vision", "hi vision"] {
+            for ww in wakeVariations {
                 if let range = command.lowercased().range(of: ww) {
                     command = String(command[range.upperBound...]).trimmingCharacters(in: .whitespaces)
                     break
@@ -591,9 +591,27 @@ final class VoiceCommandService: ObservableObject {
     /// through the glasses) can't false-trigger a stop. Excludes "stop video/stream" — that's a
     /// live-video command handled elsewhere.
     private func isStopPhrase(_ text: String) -> Bool {
-        guard detectWakeWord(in: text, bypassCooldown: true) else { return false }
         let lower = text.lowercased()
-        if lower.contains("video") || lower.contains("stream") { return false }
+        if lower.contains("video") || lower.contains("stream") || lower.contains("видео") || lower.contains("стрим") { return false }
+        // Without the wake word, only a BARE stop word counts ("стоп", "stop", "хватит" — the whole
+        // utterance, ≤3 words). Echo of the reply audio never transcribes to just that, so this is
+        // safe from phantom stops while still letting the wearer cut a reply short without the
+        // "Аурелия, …" prefix (Margo's glasses 2026-08-16: replies could not be stopped).
+        if !detectWakeWord(in: text, bypassCooldown: true) {
+            // The recognizer's transcript is CUMULATIVE for the session (it also carries the echo of
+            // the reply the mic hears), so match the TAIL: the last 1-3 words must be a stop phrase.
+            let cleaned = lower.replacingOccurrences(of: "[.,!?…]", with: "", options: .regularExpression)
+            let words = cleaned.split(separator: " ").map(String.init).filter { !$0.isEmpty }
+            guard !words.isEmpty else { return false }
+            let bare: Set<String> = ["stop", "stop it", "ok stop", "okay stop", "enough", "quiet", "shut up",
+                        "стоп", "хватит", "тихо", "замолчи", "перестань", "прекрати", "остановись", "достаточно",
+                        "стоп стоп", "хватит хватит", "всё хватит", "все хватит",
+                        "досить", "замовкни", "stil", "hou op", "genoeg", "para", "basta", "silencio", "cállate"]
+            for n in 1...min(3, words.count) {
+                if bare.contains(words.suffix(n).joined(separator: " ")) { return true }
+            }
+            return false
+        }
         var stopWords = ["stop", "be quiet", "shut up", "silence", "quiet", "enough", "cancel"]
         // The English words stay in every language (they cost nothing and the recognizer can emit
         // them for loanwords); the target language's own stop words are what actually get said.
@@ -607,19 +625,32 @@ final class VoiceCommandService: ObservableObject {
         return stopWords.contains { lower.contains($0) }
     }
 
+    /// Every phrase that counts as the wake word: the configured phrase, the stock "Ok Vision"
+    /// family, and the "Aurelia" family in Latin + Cyrillic (Apple's ru-RU recognizer spells the
+    /// name several ways: Аурелия / Аврелия / Орелия…). Shared by detection, barge-in and
+    /// command extraction so a phrase that wakes the app is also stripped from the command.
+    private var wakeVariations: [String] {
+        [
+            wakeWord.lowercased(),
+            // OK Vision variants (most reliable)
+            "ok vision", "okay vision", "o.k. vision", "o k vision",
+            "hey vision", "hi vision",
+            // Common misrecognitions
+            "a vision", "heavy vision", "have vision", "obey vision", "oak vision",
+            // Aurelia — en + ru spellings/misrecognitions
+            "aurelia", "aurellia", "orelia", "aurelio", "hey aurelia", "ok aurelia",
+            "аурелия", "аврелия", "аурэлия", "орелия", "аурели", "аурелие", "аврелие",
+            "эй аурелия", "окей аурелия", "привет аурелия",
+        ]
+    }
+
     /// True when a wake-word variation sits at (or very near) the START of the transcript — i.e. a
     /// deliberate "Ok Vision …" barge-in. During TTS the mic also hears the reply itself, whose
     /// transcription can incidentally contain a "…vision…" buried mid-sentence; requiring the wake
     /// word up front rejects those phantoms while still catching a real interrupt.
     private func wakeWordAtStart(_ text: String) -> Bool {
         let lower = text.lowercased()
-        let variations = [
-            wakeWord.lowercased(),
-            "ok vision", "okay vision", "o.k. vision", "o k vision",
-            "hey vision", "hi vision",
-            "a vision", "heavy vision", "have vision", "obey vision", "oak vision"
-        ]
-        for v in variations {
+        for v in wakeVariations {
             if let r = lower.range(of: v) {
                 // Characters of speech before the wake word. A little leeway ("uh, ok vision")
                 // is fine; a whole sentence in front of it means it's echo, not a barge-in.
@@ -634,28 +665,7 @@ final class VoiceCommandService: ObservableObject {
         guard bypassCooldown || !wakeWordCooldownActive else { return false }
 
         let lowercased = text.lowercased()
-        let wakeWordLower = wakeWord.lowercased()
-
-        // Check for exact match or common variations/misrecognitions
-        let variations = [
-            wakeWordLower,
-            // OK Vision variants (most reliable)
-            "ok vision",
-            "okay vision",
-            "o.k. vision",
-            "o k vision",
-            // Ok Vision variants
-            "hey vision",
-            "hi vision",
-            // Common misrecognitions
-            "a vision",
-            "heavy vision",
-            "have vision",
-            "obey vision",
-            "oak vision"
-        ]
-
-        let detected = variations.contains { lowercased.contains($0) }
+        let detected = wakeVariations.contains { lowercased.contains($0) }
         if detected {
             print("[VoiceCommand] Detected wake word in: '\(text)'")
         }
@@ -665,16 +675,7 @@ final class VoiceCommandService: ObservableObject {
     /// Extract command text after wake word
     private func extractCommandAfterWakeWord(_ text: String) -> String {
         let lowercased = text.lowercased()
-        let wakeWordLower = wakeWord.lowercased()
-
-        let variations = [
-            wakeWordLower,
-            "ok vision", "okay vision", "o.k. vision", "o k vision",
-            "hey vision", "hi vision",
-            "a vision", "heavy vision", "have vision", "obey vision", "oak vision"
-        ]
-
-        for variation in variations {
+        for variation in wakeVariations {
             if let range = lowercased.range(of: variation) {
                 let afterWakeWord = String(text[range.upperBound...])
                     .trimmingCharacters(in: .whitespaces)
