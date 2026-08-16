@@ -51,11 +51,16 @@ enum AIBackendType: String, Codable, CaseIterable {
 enum TTSEngineType: String, Codable, CaseIterable, Identifiable {
     case appleSystem = "apple"
     case kokoro = "kokoro"
+    /// Aurelia's own voice, synthesized on the brain server (Chirp3-HD; en Zephyr, ru Aoede) via
+    /// the OpenAI backend's `/audio/speech`. Same voice as live/realtime mode. Needs network; the
+    /// Apple voice is the automatic fallback.
+    case aureliaServer = "aurelia"
     var id: String { rawValue }
     var displayName: String {
         switch self {
         case .appleSystem: return "Apple (system voice)"
         case .kokoro: return "Kokoro (natural, on-device)"
+        case .aureliaServer: return "Aurelia (server voice)"
         }
     }
 }

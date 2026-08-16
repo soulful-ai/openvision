@@ -31,6 +31,7 @@
 		408073C736E7EB74442648EF /* MLXVLM in Frameworks */ = {isa = PBXBuildFile; productRef = FEDC861C14CDA73BBCF6CCFD /* MLXVLM */; };
 		456B4E46EE405F5C8F45B04D /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1ABBF4AC21A442A2C3CF6750 /* Theme.swift */; };
 		49DFBFFE52D341E96BCE382E /* AppleFoundationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7B97C063C947F53F6E209D1 /* AppleFoundationService.swift */; };
+		5A1C0E7B4F2D81A609B3D421 /* AureliaServerTTSService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1C0E7B4F2D81A609B3D420 /* AureliaServerTTSService.swift */; };
 		4DFF630E56769253493B4B57 /* NotificationForegroundPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4831CE885B0320D9CAD71736 /* NotificationForegroundPresenter.swift */; };
 		52E3A16AB6227CDA3D67817D /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2FD4A9B156D92B468B28864 /* AppSettings.swift */; };
 		5A1C0E7B4F2D81A609B3D411 /* SpeechLocale.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A1C0E7B4F2D81A609B3D410 /* SpeechLocale.swift */; };
@@ -158,6 +159,7 @@
 		9BDBCEE6B3B8DF551525A4DA /* AppleIntelligenceSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleIntelligenceSettingsView.swift; sourceTree = "<group>"; };
 		A1E4A28F9C0979733D4ABDB2 /* SwirlOrb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwirlOrb.swift; sourceTree = "<group>"; };
 		A7B97C063C947F53F6E209D1 /* AppleFoundationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleFoundationService.swift; sourceTree = "<group>"; };
+		5A1C0E7B4F2D81A609B3D420 /* AureliaServerTTSService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AureliaServerTTSService.swift; sourceTree = "<group>"; };
 		A900F00D2451513A29BC4C6F /* AIBackendProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIBackendProtocol.swift; sourceTree = "<group>"; };
 		ACA3BB4BDC73148785327C9A /* OpenVisionTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = OpenVisionTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		ADC230E2AE44E5132DC5AB01 /* SettingsManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsManager.swift; sourceTree = "<group>"; };
@@ -507,6 +509,7 @@
 		C6EBF5734AD805262779ECA5 /* TTS */ = {
 			isa = PBXGroup;
 			children = (
+				5A1C0E7B4F2D81A609B3D420 /* AureliaServerTTSService.swift */,
 				BE848862D72446F7BBDD3D89 /* KokoroTTSService.swift */,
 				D416290774C17FDC0DDFBC68 /* TTSService.swift */,
 			);
@@ -742,6 +745,7 @@
 				52E3A16AB6227CDA3D67817D /* AppSettings.swift in Sources */,
 				5A1C0E7B4F2D81A609B3D411 /* SpeechLocale.swift in Sources */,
 				49DFBFFE52D341E96BCE382E /* AppleFoundationService.swift in Sources */,
+				5A1C0E7B4F2D81A609B3D421 /* AureliaServerTTSService.swift in Sources */,
 				3CEB0ABE3CA96726C9FC7C3F /* AppleIntelligenceSettingsView.swift in Sources */,
 				DCA893B0F4EB539CA4C1EC00 /* AppleNativeTools.swift in Sources */,
 				5C474A09B3067A8ACD7546C1 /* AudioCaptureService.swift in Sources */,

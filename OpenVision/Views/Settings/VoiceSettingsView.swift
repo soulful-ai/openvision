@@ -149,12 +149,15 @@ struct VoiceSettingsView: View {
                     }
                 }
 
-                if settingsManager.settings.ttsEngine == .appleSystem || !KokoroTTSService.supportsCurrentLanguage {
+                // The Apple voice picker stays visible unless Kokoro is really in charge: it is
+                // the voice that speaks when Kokoro can't (non-English) and the fallback the
+                // server voice degrades to when the brain can't be reached.
+                if settingsManager.settings.ttsEngine != .kokoro || !KokoroTTSService.supportsCurrentLanguage {
                     NavigationLink {
                         VoiceSelectionView()
                     } label: {
                         HStack {
-                            Text("Apple Voice")
+                            Text(settingsManager.settings.ttsEngine == .aureliaServer ? "Apple Voice (fallback)" : "Apple Voice")
                             Spacer()
                             Text(selectedVoiceName).foregroundColor(.secondary)
                         }
@@ -180,7 +183,11 @@ struct VoiceSettingsView: View {
             } header: {
                 Text("Output Voice")
             } footer: {
-                if settingsManager.settings.ttsEngine == .kokoro && !KokoroTTSService.supportsCurrentLanguage {
+                if settingsManager.settings.ttsEngine == .aureliaServer && !AureliaServerTTSService.isConfigured {
+                    Text("Aurelia's server voice needs the OpenAI backend's Endpoint and API Key (Settings → OpenAI). Until they are set, replies are spoken by the Apple system voice.")
+                } else if settingsManager.settings.ttsEngine == .aureliaServer {
+                    Text("Aurelia's own voice, synthesized on the server (Google Chirp3-HD, the same voice as live mode) in \(resolvedLanguageTag) and streamed sentence by sentence. Needs a network connection; if the server can't be reached, the Apple voice speaks instead.")
+                } else if settingsManager.settings.ttsEngine == .kokoro && !KokoroTTSService.supportsCurrentLanguage {
                     Text("Kokoro can only pronounce English, so replies in \(resolvedLanguageTag) are spoken by the Apple system voice instead. Switch the language to English to use Kokoro.")
                 } else if settingsManager.settings.ttsEngine == .kokoro {
                     Text("Kokoro is a natural, on-device neural voice — private and offline. Download its model (~600 MB) under Kokoro Model, then it runs entirely on-device. English only.")

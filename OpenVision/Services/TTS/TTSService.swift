@@ -1,5 +1,7 @@
 // OpenVision - TTSService.swift
-// Text-to-speech service using AVSpeechSynthesizer
+// Text-to-speech service using AVSpeechSynthesizer — and, when the "Aurelia (server voice)"
+// engine is selected, the brain's Chirp3-HD voice via AureliaServerTTSService with the Apple
+// voice as the automatic fallback. Callers see one API either way.
 
 import AVFoundation
 import Foundation
@@ -90,6 +92,41 @@ final class TTSService: NSObject, ObservableObject {
     private override init() {
         super.init()
         synthesizer.delegate = self
+        wireServerVoice()
+    }
+
+    // MARK: - Server voice (Aurelia)
+
+    /// True when chunks should be fetched from the brain instead of spoken by AVSpeechSynthesizer.
+    /// Requires the OpenAI backend URL + key (the brain's /v1); otherwise the Apple voice speaks.
+    private var usingServerVoice: Bool {
+        SettingsManager.shared.settings.ttsEngine == .aureliaServer && AureliaServerTTSService.isConfigured
+    }
+
+    /// The server queue reports per-chunk lifecycle through these; they mirror the synthesizer
+    /// delegate below so `pendingUtterances` / `isSpeaking` / the callbacks behave identically.
+    private func wireServerVoice() {
+        let server = AureliaServerTTSService.shared
+        server.onChunkStarted = { [weak self] in self?.chunkDidStart() }
+        server.onChunkFinished = { [weak self] in self?.chunkDidFinish() }
+        // Fallback keeps the chunk's pending slot: Apple's didFinish/didCancel will release it.
+        server.onFallback = { [weak self] text in self?.speakWithApple(text) }
+    }
+
+    private func chunkDidStart() {
+        if !isSpeaking {
+            isSpeaking = true
+            onSpeechStarted?()
+        }
+    }
+
+    private func chunkDidFinish() {
+        pendingUtterances = max(0, pendingUtterances - 1)
+        // Only truly "done" when the queue is empty AND no more sentences are coming.
+        if pendingUtterances == 0 && !streamingActive {
+            isSpeaking = false
+            onSpeechEnded?()
+        }
     }
 
     // MARK: - Speak
@@ -97,7 +134,12 @@ final class TTSService: NSObject, ObservableObject {
     /// Speak text (single-shot: replaces anything currently playing).
     func speak(_ text: String) {
         stop()
-        enqueue(text)
+        if usingServerVoice {
+            // Per-sentence requests: the first sentence starts playing while the rest are fetched.
+            for sentence in TextChunking.sentences(text) { enqueue(sentence) }
+        } else {
+            enqueue(text)
+        }
     }
 
     // MARK: - Streaming (sentence-by-sentence)
@@ -128,20 +170,35 @@ final class TTSService: NSObject, ObservableObject {
         }
     }
 
-    /// Build an utterance with the selected voice and hand it to the synthesizer's queue.
+    /// Hand one chunk to the active engine's queue: the server voice when selected + configured,
+    /// else an utterance with the selected Apple voice.
     private func enqueue(_ text: String) {
+        pendingUtterances += 1
+        if usingServerVoice {
+            // Latch speaking immediately (like Kokoro does during synthesis) so the recognizer
+            // stays paused during the ~0.5 s fetch instead of hearing the room.
+            chunkDidStart()
+            AureliaServerTTSService.shared.enqueue(text)
+        } else {
+            speakWithApple(text)
+        }
+    }
+
+    /// Build an utterance with the selected voice and hand it to the synthesizer's queue. The
+    /// caller has already counted it in `pendingUtterances`.
+    private func speakWithApple(_ text: String) {
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = selectedVoice
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate
         utterance.pitchMultiplier = 1.0
         utterance.volume = 1.0
-        pendingUtterances += 1
         synthesizer.speak(utterance)
     }
 
     /// Stop speaking and clear the queue.
     func stop() {
         synthesizer.stopSpeaking(at: .immediate)
+        AureliaServerTTSService.shared.stop()
         streamingActive = false
         pendingUtterances = 0
         isSpeaking = false
