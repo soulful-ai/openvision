@@ -152,6 +152,9 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
     private var truncatedItems: Set<String> = []
     /// False until the session's first reply has been prepared — the first one is the fragile one.
     private var hasPlayedAnyReply = false
+    /// AUR-746: the brain said goodbye and is ending the conversation. Everything after this is
+    /// expected — the socket closing is not a drop and must not start the `?resume=` backoff.
+    private var sessionClosing = false
 
     // MARK: - Video Throttling
 
@@ -169,6 +172,7 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
         guard !connectionState.isUsable, !connectionState.isAttempting, !isOpening else { return }
         intentionalClose = false
         hasPlayedAnyReply = false
+        sessionClosing = false
         try await openSocket(resuming: false)
         reconnectAttempt = 0
     }
@@ -564,6 +568,12 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
             onsetAt = nil
             ovLog("[OpenAIRealtime] ▶︎ playback.resume (false alarm after \(waited) ms)")
 
+        // ── AUR-746: the wearer ended the conversation by voice; the farewell is already on
+        //    its way to the ear. Let it finish, then tear down exactly like the End pill. ───────
+        case "aurelia.session.close":
+            let reason = (json["reason"] as? String) ?? "user_request"
+            endAfterFarewell(reason: reason)
+
         // ── AUR-728: the pod is going away — reconnect on the hint, keep the session ──────────
         case "aurelia.server.draining":
             if let id = json["session_id"] as? String { sessionId = id }
@@ -682,6 +692,38 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
                 "item_id": itemId,
                 "played_ms": Int(playedMs.rounded())
             ])
+        }
+    }
+
+    // MARK: - Voice-ended session (AUR-746 client half)
+
+    /// The brain has spoken its goodbye and asked to end the conversation. Do NOT cut playback —
+    /// the farewell is already queued in the ring; wait for the ear to catch up, then close the
+    /// session the same way the End pill does (`onDisconnected` → `stopLiveVideoMode`). The
+    /// server also closes the socket ~3 s later; because `intentionalClose` is set, that close is
+    /// swallowed as expected rather than treated as a drop that needs `?resume=`.
+    private func endAfterFarewell(reason: String) {
+        guard !sessionClosing else { return }
+        sessionClosing = true
+        intentionalClose = true
+        reconnectTask?.cancel(); reconnectTask = nil
+        let pending = playback?.pendingMs ?? 0
+        ovLog("[OpenAIRealtime] Session close requested (\(reason)) — letting \(Int(pending)) ms of farewell finish")
+
+        Task { @MainActor in
+            // Drain, with a ceiling so a stalled ring can never strand the session open.
+            let deadline = Date().addingTimeInterval(10)
+            while Date() < deadline, (self.playback?.pendingMs ?? 0) > 0 {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            ovLog("[OpenAIRealtime] Farewell played out — ending the session (\(reason))")
+            self.closeWebSocket()
+            self.connectionState = .disconnected
+            self.onConnectionStateChanged?(self.connectionState)
+            self.sessionId = nil
+            self.offlineAudio.removeAll(); self.offlineAudioBytes = 0
+            // Same exit the End pill takes: the VM tears live mode down and returns to idle.
+            self.onDisconnected?()
         }
     }
 

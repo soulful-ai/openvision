@@ -306,6 +306,8 @@ protocol RealtimePlaybackSink: AnyObject {
     func duck(_ ducked: Bool)
     /// Played ms of the item currently at the head of the queue.
     func headPlayedMs() -> (itemId: String, playedMs: Double)?
+    /// Milliseconds of audio still waiting to be rendered (0 = the ear is caught up).
+    var pendingMs: Double { get }
     /// Fired on the main actor when an item has fully left the speaker.
     var onItemPlayed: ((String, Double) -> Void)? { get set }
 
@@ -613,6 +615,9 @@ final class AudioPlaybackService: ObservableObject, RealtimePlaybackSink {
         guard let ring else { return 0 }
         return Double(ring.bufferedFrames) / max(1, inputSampleRate) * 1000
     }
+
+    /// `RealtimePlaybackSink` — what is still owed to the ear (AUR-746 farewell drain).
+    var pendingMs: Double { bufferedMs }
 
     // MARK: - Private
 
