@@ -37,6 +37,9 @@ final class VoiceAgentViewModel: ObservableObject {
     @Published var errorMessage: String?
     /// Live Video Mode - uses Gemini Live or OpenAI Realtime for real-time audio + video
     @Published var isLiveVideoMode = false
+
+    /// Audio rig in use while a live session runs ("a2dp+phone-mic", "hfp+bt-mic", …) — AUR-723.
+    @Published var liveRoute: String = "unknown"
     /// True when voice recognition is ready (audio engine running)
     @Published var isVoiceReady = false
     /// True while a POV demo recording (glasses video + mic audio) is in progress.
@@ -871,7 +874,12 @@ final class VoiceAgentViewModel: ObservableObject {
             return
         }
 
-        guard glassesManager.isRegistered else {
+        // AUR-723: the realtime conversation is AUDIO-first — the camera is an optional add-on.
+        // Requiring DAT-registered glasses here is what kept the full-duplex path from ever being
+        // exercised (plan fault B10); the gate stays for the video-only backends below.
+        let realtimeAudioPath = settingsManager.settings.aiBackend == .openAI
+            && settingsManager.settings.isOpenAIConfigured
+        guard glassesManager.isRegistered || realtimeAudioPath else {
             ttsService.speak("Please connect your glasses first")
             return
         }
@@ -904,10 +912,27 @@ final class VoiceAgentViewModel: ObservableObject {
         // Match the audio pipeline to the backend's sample rates (Gemini 16k in / 24k out,
         // OpenAI 24k in / 24k out) before starting capture/playback.
         audioCapture.targetSampleRate = Double(service.inputSampleRate)
+        audioCapture.chunkDurationMs = Constants.RealtimeAudio.captureFrameMs
+        audioCapture.applyFormatSettings()
         audioPlayback.inputSampleRate = Double(service.outputSampleRate)
 
-        // Start glasses streaming
-        if !glassesManager.isStreaming {
+        // AUR-723: ONE `.playAndRecord` + `.voiceChat` session with voice-processing IO, so the
+        // mic can stay open for the whole conversation without the reply echoing back into it.
+        // The "glasses mic" setting still decides whether HFP is allowed (classic BT then drops
+        // playback to HFP — the known robotic-voice trade-off, plan §4).
+        let wantsGlassesMic = settingsManager.settings.preferGlassesMic
+            && glassesManager.isRegistered
+            && !glassesManager.isStreaming
+        do {
+            try AudioSessionManager.shared.configureFullDuplex(preferGlassesMic: wantsGlassesMic)
+        } catch {
+            print("[VoiceAgent] Full-duplex audio session failed: \(error)")
+        }
+        liveRoute = AudioSessionManager.shared.routeInfo.tag
+        openAIRealtime.routeTag = liveRoute
+
+        // Start glasses streaming (only when they're actually there — audio-only rigs skip it).
+        if glassesManager.isRegistered, !glassesManager.isStreaming {
             await glassesManager.startStreaming()
         }
 
@@ -933,21 +958,41 @@ final class VoiceAgentViewModel: ObservableObject {
         // Setup live backend callbacks
         setupLiveVideoCallbacks(service)
 
-        // Setup audio capture → live backend
+        // Setup audio capture → live backend (continuous: no isModelSpeaking gate any more)
         audioCapture.onAudioCaptured = { [weak service] data in
             service?.sendAudio(data: data)
         }
 
-        // Setup audio playback
+        // ONE engine for capture + playback (AUR-723); route churn reinstalls the tap in place.
+        let sharedEngine = try? AudioSessionManager.shared.startSharedEngine(voiceProcessing: true)
+        AudioSessionManager.shared.onEngineConfigurationChange = { [weak self] in
+            guard let self, self.isLiveVideoMode else { return }
+            let engine = AudioSessionManager.shared.sharedEngine
+            self.audioCapture.reconfigure(engine: engine)
+            self.audioPlayback.reattachIfNeeded(engine: engine)
+        }
+        AudioSessionManager.shared.onRouteChange = { [weak self] info in
+            guard let self else { return }
+            self.liveRoute = info.tag
+            self.openAIRealtime.routeTag = info.tag
+        }
+
+        // Setup audio playback (ring buffer with pause / flush / played-ms accounting)
         do {
-            try audioPlayback.setup()
+            try audioPlayback.setup(engine: sharedEngine)
         } catch {
             print("[VoiceAgent] Failed to setup audio playback: \(error)")
         }
 
+        // The realtime service drives playback directly (item ids + barge-in flush); the legacy
+        // backends keep going through `onAudioReceived`.
+        if let realtime = service as? OpenAIRealtimeService {
+            realtime.playback = audioPlayback
+        }
+
         // Start audio capture
         do {
-            try audioCapture.startCapture()
+            try audioCapture.startCapture(engine: sharedEngine)
         } catch {
             errorMessage = "Failed to start audio capture: \(error.localizedDescription)"
             await service.disconnect()
@@ -1079,8 +1124,12 @@ final class VoiceAgentViewModel: ObservableObject {
         audioCapture.stopCapture()
         audioCapture.onAudioCaptured = nil
 
-        // Stop audio playback
+        // Stop audio playback + release the shared engine (AUR-723)
+        openAIRealtime.playback = nil
         audioPlayback.teardown()
+        AudioSessionManager.shared.onEngineConfigurationChange = nil
+        AudioSessionManager.shared.onRouteChange = nil
+        AudioSessionManager.shared.stopSharedEngine()
 
         // Disconnect the active live backend (Gemini or OpenAI Realtime)
         await activeLiveService?.disconnect()
