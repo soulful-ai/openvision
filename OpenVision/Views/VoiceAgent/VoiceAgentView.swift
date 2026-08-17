@@ -237,7 +237,7 @@ struct VoiceAgentView: View {
                         Text(settingsManager.settings.backendDisplayName)
                             .font(.headline)
                             .foregroundColor(Theme.heading)
-                        Text("Say \"stop video\" to exit")
+                        Text("Tap the orb to end")
                             .font(.caption)
                             .foregroundColor(Theme.textSecondary)
                     }
@@ -247,9 +247,14 @@ struct VoiceAgentView: View {
                             .font(.system(size: 30, weight: .bold, design: .rounded))
                             .foregroundColor(Theme.heading)
                         if viewModel.isVoiceReady {
-                            Text("Say \"\(settingsManager.settings.wakeWord)\" or tap the orb")
-                                .font(.subheadline)
-                                .foregroundColor(Theme.textSecondary)
+                            VStack(spacing: 4) {
+                                Text("Say \"\(settingsManager.settings.wakeWord)\" or tap to talk")
+                                    .font(.subheadline)
+                                    .foregroundColor(Theme.textSecondary)
+                                Text("Long-press the orb for push-to-ask")
+                                    .font(.caption2)
+                                    .foregroundColor(Theme.textSecondary.opacity(0.7))
+                            }
                         } else {
                             HStack(spacing: 8) {
                                 ProgressView().tint(Theme.accent).scaleEffect(0.8)
@@ -265,7 +270,49 @@ struct VoiceAgentView: View {
 
             // The assistant identity: swirling emerald orb (tap to start/stop a session)
             SwirlOrb(mode: orbMode, size: 250)
-                .onTapGesture { viewModel.toggleSession() }
+                // AUR-742a: ONE TAP opens the realtime conversation (no «включи видео» needed).
+                // Push-to-ask — Margo's fallback until AUR-744 — moves to a long press.
+                .onTapGesture { viewModel.toggleTalkMode() }
+                .onLongPressGesture(minimumDuration: 0.6) { viewModel.toggleSession() }
+                .accessibilityLabel(viewModel.isLiveVideoMode ? "End the conversation" : "Start the conversation")
+                .accessibilityHint("Double tap to talk. Touch and hold for push-to-ask.")
+
+            // Explicit entry next to the orb, so the conversation is discoverable without
+            // knowing that the orb is tappable.
+            HStack(spacing: 12) {
+                Button {
+                    viewModel.toggleTalkMode()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: viewModel.isLiveVideoMode ? "stop.circle.fill" : "waveform.circle.fill")
+                            .font(.title3)
+                        Text(viewModel.isLiveVideoMode ? "End" : "Talk / Разговор")
+                            .font(.subheadline.bold())
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
+                    .background(
+                        Capsule().fill(viewModel.isLiveVideoMode
+                                       ? Color.red.opacity(0.85) : Theme.accent.opacity(0.9))
+                    )
+                }
+                .disabled(!viewModel.canStartTalkMode)
+                .opacity(viewModel.canStartTalkMode ? 1 : 0.4)
+
+                if !viewModel.isLiveVideoMode {
+                    Button {
+                        viewModel.toggleSession()
+                    } label: {
+                        Text(viewModel.isSessionActive ? "Stop push-to-ask" : "Push-to-ask")
+                            .font(.caption.bold())
+                            .foregroundColor(Theme.textSecondary)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            .background(Capsule().stroke(Theme.textSecondary.opacity(0.35), lineWidth: 1))
+                    }
+                }
+            }
 
             // Status text
             Text(viewModel.agentState.displayText)

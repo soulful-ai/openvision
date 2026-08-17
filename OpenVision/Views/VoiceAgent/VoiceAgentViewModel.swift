@@ -1227,6 +1227,27 @@ final class VoiceAgentViewModel: ObservableObject {
         ttsService.speak("Live video mode ended")
     }
 
+    // MARK: - Talk mode entry (AUR-742a)
+
+    /// ONE TAP into the realtime conversation — the same audio-first path «включи видео» takes,
+    /// without the phrase. The camera stays an optional add-on inside the session (AUR-723b), so
+    /// this is an AUDIO entry: no glasses required, no video wording.
+    func toggleTalkMode() {
+        Task { @MainActor in
+            if isLiveVideoMode {
+                await stopLiveVideoMode()
+            } else {
+                await startLiveVideoMode()
+            }
+        }
+    }
+
+    /// True when a one-tap Talk session can be opened (the realtime backend is configured).
+    var canStartTalkMode: Bool {
+        let s = settingsManager.settings
+        return (s.aiBackend == .openAI && s.isOpenAIConfigured) || s.isGeminiConfigured || s.isOpenAIConfigured
+    }
+
     // MARK: - Live camera source (AUR-723b)
 
     /// Pick the eye for the live session: the glasses when they are actually streaming, the
