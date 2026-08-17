@@ -65,6 +65,7 @@
 		8351C940EEB51503B73F3449 /* KokoroSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F363A639A7050AFBDFAF486 /* KokoroSettingsView.swift */; };
 		88419FB22964F22C4FB748C2 /* ClipboardTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = F45F55A97C67CC055B44A349 /* ClipboardTool.swift */; };
 		8BB3557D9BE4E9F2399BDBC1 /* VoiceAgentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 601D21AA8114E457F40C6C4A /* VoiceAgentView.swift */; };
+		A0C761B8F65AD0892D3FB6E3 /* PhoneCameraService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BAC1716146D3E2731035A11 /* PhoneCameraService.swift */; };
 		A17626C4B92966423AF06452 /* OpenAIRealtimeService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 422747099A4406E793760E57 /* OpenAIRealtimeService.swift */; };
 		A7A3B0467B07F116AEF20BEE /* AudioSessionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DA55F18F98C8B110680989C /* AudioSessionManager.swift */; };
 		AF2C901CA288086B7EBA6083 /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7376B3EE1F53DF1BD56B1095 /* Constants.swift */; };
@@ -116,6 +117,7 @@
 		09CF2D46A856380011EEC513 /* OVExceptionCatcher.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = OVExceptionCatcher.m; sourceTree = "<group>"; };
 		0E256E8AF9CAB4123C91B979 /* TranscriptBubble.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptBubble.swift; sourceTree = "<group>"; };
 		1ABBF4AC21A442A2C3CF6750 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		1BAC1716146D3E2731035A11 /* PhoneCameraService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneCameraService.swift; sourceTree = "<group>"; };
 		1DD518E30804BD392EEA0B34 /* wake_activation.mp3 */ = {isa = PBXFileReference; lastKnownFileType = audio.mp3; path = wake_activation.mp3; sourceTree = "<group>"; };
 		2410F1B11CD5A7070F3E7590 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		257CFA920D044908381B85FE /* RealtimePlaybackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimePlaybackTests.swift; sourceTree = "<group>"; };
@@ -392,6 +394,7 @@
 				F5B2AD1E1FABED62439F7733 /* AIBackend */,
 				95CA46C43A53365AD4139930 /* AppleFoundation */,
 				A29C7061AA685E560166CE85 /* Audio */,
+				8E63FD05660B86DF84DCAF42 /* Camera */,
 				7B780FDA4F96B3F7AB139870 /* Documents */,
 				2250FA48F206C7E76373000D /* GeminiLive */,
 				B929FE4E9AB889620F64C057 /* GemmaLocal */,
@@ -435,6 +438,14 @@
 				C539AB340611B1A6CCC50F17 /* OpenClawService.swift */,
 			);
 			path = OpenClaw;
+			sourceTree = "<group>";
+		};
+		8E63FD05660B86DF84DCAF42 /* Camera */ = {
+			isa = PBXGroup;
+			children = (
+				1BAC1716146D3E2731035A11 /* PhoneCameraService.swift */,
+			);
+			path = Camera;
 			sourceTree = "<group>";
 		};
 		8F12C1169529CE44B11137F4 /* Packages */ = {
@@ -795,6 +806,7 @@
 				186FD72F369F1962B15EB858 /* OpenClawService.swift in Sources */,
 				758F66B632E8A1CBDBB40094 /* OpenClawSettingsView.swift in Sources */,
 				EF5319DFC76B8BD9A50EF195 /* OpenVisionApp.swift in Sources */,
+				A0C761B8F65AD0892D3FB6E3 /* PhoneCameraService.swift in Sources */,
 				5F9D55BB6AA2E4CF8AF85A49 /* PomodoroTool.swift in Sources */,
 				CB6636C853387785316153FD /* ReminderTool.swift in Sources */,
 				1D0AEF3C7A810FF410C8F2E5 /* SessionRecorder.swift in Sources */,

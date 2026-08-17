@@ -9,6 +9,7 @@
 
 import SwiftUI
 import Speech
+import Combine
 
 @MainActor
 final class VoiceAgentViewModel: ObservableObject {
@@ -24,6 +25,7 @@ final class VoiceAgentViewModel: ObservableObject {
     let ttsService = TTSService.shared
     let soundService = SoundService.shared
     let audioCapture = AudioCaptureService()
+    let phoneCamera = PhoneCameraService.shared
     let audioPlayback = AudioPlaybackService()
     let sessionRecorder = SessionRecorder.shared
 
@@ -40,6 +42,31 @@ final class VoiceAgentViewModel: ObservableObject {
 
     /// Audio rig in use while a live session runs ("a2dp+phone-mic", "hfp+bt-mic", …) — AUR-723.
     @Published var liveRoute: String = "unknown"
+
+    /// Which eye is feeding the live session (AUR-723b). Glasses first; the phone's own rear
+    /// camera when none are paired — before this, a phone-only rig sent NO frames at all and
+    /// "what do you see" had nothing to describe.
+    enum LiveCameraSource: Equatable {
+        case none
+        case glasses
+        case phone
+
+        var label: String {
+            switch self {
+            case .none: return "No camera"
+            case .glasses: return "Glasses"
+            case .phone: return "Phone camera"
+            }
+        }
+        var symbol: String {
+            switch self {
+            case .none: return "eye.slash"
+            case .glasses: return "eyeglasses"
+            case .phone: return "camera.fill"
+            }
+        }
+    }
+    @Published var liveCameraSource: LiveCameraSource = .none
     /// True when voice recognition is ready (audio engine running)
     @Published var isVoiceReady = false
     /// True while a POV demo recording (glasses video + mic audio) is in progress.
@@ -71,6 +98,12 @@ final class VoiceAgentViewModel: ObservableObject {
 
     /// Frame counter for logging
     private var videoFrameCount: Int = 0
+
+    /// AUR-723b: watches glasses streaming/registration so the live eye switches between the
+    /// glasses and the phone camera without restarting the conversation.
+    private var cameraSourceWatch: Set<AnyCancellable> = []
+    /// The camera refusal is stated once per session, not once per frame.
+    private var phoneCameraDeniedAnnounced = false
 
     // MARK: - Agent State
 
@@ -1008,6 +1041,12 @@ final class VoiceAgentViewModel: ObservableObject {
             }
         }
 
+        // AUR-723b: glasses first, phone camera otherwise — and keep following that as the
+        // glasses come and go mid-session.
+        phoneCameraDeniedAnnounced = false
+        await updateLiveCameraSource()
+        watchCameraSource()
+
         isLiveVideoMode = true
         agentState = .liveVideo
 
@@ -1124,6 +1163,11 @@ final class VoiceAgentViewModel: ObservableObject {
         audioCapture.stopCapture()
         audioCapture.onAudioCaptured = nil
 
+        // Stop the phone camera + its watchers (AUR-723b)
+        cameraSourceWatch.removeAll()
+        phoneCamera.stop()
+        liveCameraSource = .none
+
         // Stop audio playback + release the shared engine (AUR-723)
         openAIRealtime.playback = nil
         audioPlayback.teardown()
@@ -1170,6 +1214,76 @@ final class VoiceAgentViewModel: ObservableObject {
 
         print("[VoiceAgent] Live video mode stopped")
         ttsService.speak("Live video mode ended")
+    }
+
+    // MARK: - Live camera source (AUR-723b)
+
+    /// Pick the eye for the live session: the glasses when they are actually streaming, the
+    /// iPhone's rear camera otherwise. Frames go down the SAME path either way
+    /// (`sendVideoFrame` → `input_image` item), so the brain sees no difference.
+    private func updateLiveCameraSource() async {
+        guard isLiveVideoMode, let service = activeLiveService else { return }
+
+        if glassesManager.isStreaming {
+            if phoneCamera.isRunning { phoneCamera.stop() }
+            if liveCameraSource != .glasses {
+                liveCameraSource = .glasses
+                print("[VoiceAgent] Live eye: glasses")
+            }
+            return
+        }
+
+        if phoneCamera.isRunning {
+            liveCameraSource = .phone
+            return
+        }
+
+        // Same 1 fps preference the glasses path uses.
+        phoneCamera.framesPerSecond = Double(max(1, settingsManager.settings.geminiVideoFPS))
+        phoneCamera.onFrame = { [weak service] image in
+            if let jpegData = image.jpegData(compressionQuality: 0.6) {
+                service?.sendVideoFrame(imageData: jpegData)
+            }
+        }
+        switch await phoneCamera.start() {
+        case .started:
+            liveCameraSource = .phone
+            print("[VoiceAgent] Live eye: phone camera (no glasses streaming)")
+        case .denied:
+            liveCameraSource = .none
+            announcePhoneCameraUnavailable("I can't see anything right now — camera access is off for OpenVision. Turn it on in Settings › OpenVision › Camera.")
+        case .unavailable(let why):
+            liveCameraSource = .none
+            announcePhoneCameraUnavailable("I can't open the camera right now (\(why)), so I'm listening only.")
+        }
+    }
+
+    /// State it once per live session, as assistant text — never per frame, never a crash.
+    private func announcePhoneCameraUnavailable(_ message: String) {
+        guard !phoneCameraDeniedAnnounced else { return }
+        phoneCameraDeniedAnnounced = true
+        aiTranscript = message
+        errorMessage = message
+        print("[VoiceAgent] Phone camera unavailable: \(message)")
+    }
+
+    /// Follow glasses registration/streaming while live so the eye switches without a restart.
+    private func watchCameraSource() {
+        cameraSourceWatch.removeAll()
+        glassesManager.$isStreaming
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in
+                Task { @MainActor in await self?.updateLiveCameraSource() }
+            }
+            .store(in: &cameraSourceWatch)
+        glassesManager.$isRegistered
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in
+                Task { @MainActor in await self?.updateLiveCameraSource() }
+            }
+            .store(in: &cameraSourceWatch)
     }
 
     /// Setup live backend callbacks for audio/transcription (Gemini Live or OpenAI Realtime)

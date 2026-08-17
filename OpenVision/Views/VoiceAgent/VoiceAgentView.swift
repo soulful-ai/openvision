@@ -137,6 +137,26 @@ struct VoiceAgentView: View {
                     Capsule()
                         .fill(.red.opacity(0.8))
                 )
+
+                // AUR-723b: which eye she is actually seeing through — glasses, the phone's own
+                // rear camera, or nothing (camera permission off).
+                HStack(spacing: 4) {
+                    Image(systemName: viewModel.liveCameraSource.symbol)
+                        .font(.caption2)
+                    Text(viewModel.liveCameraSource.label)
+                        .font(.caption2.bold())
+                }
+                .foregroundColor(.white)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    Capsule().fill(
+                        viewModel.liveCameraSource == .none
+                            ? Color.gray.opacity(0.7) : Color.blue.opacity(0.8)
+                    )
+                )
+                .padding(.leading, 6)
+                .accessibilityLabel("Live camera source: \(viewModel.liveCameraSource.label)")
             } else {
                 StatusPill(
                     status: settingsManager.settings.backendDisplayName,
