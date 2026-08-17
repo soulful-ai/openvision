@@ -101,21 +101,24 @@ final class PhoneCameraService: ObservableObject {
             configured = true
         }
 
-        proxy.minInterval = 1.0 / max(0.2, framesPerSecond)
-        proxy.onFrame = { [weak self] image in
-            Task { @MainActor in
-                guard let self, self.isRunning else { return }
-                self.lastFrame = image
-                self.lastFrameTime = Date()
-                self.onFrame?(image)
-            }
-        }
-
         isRunning = true
-        // startRunning blocks; keep it off the main actor.
+        // startRunning blocks; keep it off the main actor. The proxy's callback + interval are
+        // written on the CAPTURE queue (the only thread that reads them) — assigning them from
+        // the main actor while a buffer is being handled would be a data race on the closure.
         let session = self.session
+        let proxy = self.proxy
+        let interval = 1.0 / max(0.2, framesPerSecond)
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            queue.async {
+            queue.async { [weak self] in
+                proxy.minInterval = interval
+                proxy.onFrame = { image in
+                    Task { @MainActor in
+                        guard let self, self.isRunning else { return }
+                        self.lastFrame = image
+                        self.lastFrameTime = Date()
+                        self.onFrame?(image)
+                    }
+                }
                 if !session.isRunning { session.startRunning() }
                 cont.resume()
             }
@@ -128,11 +131,14 @@ final class PhoneCameraService: ObservableObject {
         guard isRunning || session.isRunning else { return }
         isRunning = false
         onFrame = nil
-        proxy.onFrame = nil
         lastFrame = nil
         lastFrameTime = .distantPast
         let session = self.session
-        queue.async { if session.isRunning { session.stopRunning() } }
+        let proxy = self.proxy
+        queue.async {
+            proxy.onFrame = nil
+            if session.isRunning { session.stopRunning() }
+        }
         print("[PhoneCamera] Stopped")
     }
 
