@@ -137,6 +137,8 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
     private var onsetAt: Date?
     /// Item ids already truncated, so `cleared` + cancelled `response.done` do not double-send.
     private var truncatedItems: Set<String> = []
+    /// False until the session's first reply has been prepared — the first one is the fragile one.
+    private var hasPlayedAnyReply = false
 
     // MARK: - Video Throttling
 
@@ -153,6 +155,7 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
         guard !apiKey.isEmpty else { throw AIBackendError.notConfigured }
         guard !connectionState.isUsable, !connectionState.isAttempting, !isOpening else { return }
         intentionalClose = false
+        hasPlayedAnyReply = false
         try await openSocket(resuming: false)
         reconnectAttempt = 0
     }
@@ -542,6 +545,11 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
             // triggered THIS turn belongs to the previous response, not to this one.
             playback?.resumePlayback()
             onsetAt = nil
+            // First-turn guarantee: the deltas are ~1-3 s away, so this is the moment to prove the
+            // speaker can render — the first reply of a session arrives while the `.playAndRecord`
+            // route is still settling, and it was the one the wearer never heard.
+            playback?.ensureReadyForPlayback(firstOfSession: !hasPlayedAnyReply)
+            hasPlayedAnyReply = true
 
         case "response.output_item.added":
             if let item = json["item"] as? [String: Any], let id = item["id"] as? String {

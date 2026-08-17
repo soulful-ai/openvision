@@ -232,6 +232,27 @@ final class PlaybackRingBuffer {
         return result
     }
 
+    /// Take everything still unrendered, oldest first, with the item it belongs to, and empty the
+    /// ring. Used when the graph has to be rebuilt mid-reply: the audio moves to the new ring
+    /// instead of being thrown away (that loss is silent and sounds exactly like "she never spoke").
+    func drain() -> (handle: Int32, samples: [Float])? {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        guard count > 0, segCount > 0 else { return nil }
+        let handle = segments[segHead % maxSegments].handle
+        var out = [Float](repeating: 0, count: count)
+        out.withUnsafeMutableBufferPointer { buf in
+            guard let base = buf.baseAddress else { return }
+            let firstRun = min(count, capacity - readIndex)
+            base.update(from: storage.advanced(by: readIndex), count: firstRun)
+            if count > firstRun { base.advanced(by: firstRun).update(from: storage, count: count - firstRun) }
+        }
+        readIndex = 0; writeIndex = 0; count = 0
+        segHead = 0; segCount = 0
+        paused = false
+        return (handle, out)
+    }
+
     /// Items that finished playing since the last call (main actor polls this).
     func takeCompleted() -> [PlaybackCompletion] {
         os_unfair_lock_lock(&lock)
@@ -287,6 +308,9 @@ protocol RealtimePlaybackSink: AnyObject {
     func headPlayedMs() -> (itemId: String, playedMs: Double)?
     /// Fired on the main actor when an item has fully left the speaker.
     var onItemPlayed: ((String, Double) -> Void)? { get set }
+
+    /// Called before the first delta of a reply: prove the speaker is actually ready to render.
+    func ensureReadyForPlayback(firstOfSession: Bool)
 }
 
 // MARK: - Service
@@ -355,6 +379,11 @@ final class AudioPlaybackService: ObservableObject, RealtimePlaybackSink {
     /// Attach to the shared engine (AUR-723: ONE engine for capture + playback). When no engine is
     /// supplied a private one is created, which keeps the legacy Gemini path working standalone.
     func setup(engine sharedEngine: AVAudioEngine? = nil) throws {
+        // A rebuild must not swallow the reply that is already in flight.
+        var carry: (itemId: String, samples: [Float])?
+        if let ring, let pending = ring.drain(), let itemId = itemIds[pending.handle] {
+            carry = (itemId, pending.samples)
+        }
         teardown()
 
         let engine: AVAudioEngine
@@ -425,6 +454,10 @@ final class AudioPlaybackService: ObservableObject, RealtimePlaybackSink {
         lastRenderedSeen = 0
         lastAdvanceAt = Date()
         pausedAt = nil
+        if let carry, !carry.samples.isEmpty {
+            ring.append(carry.samples, handle: handle(for: carry.itemId))
+            ovLog("[AudioPlayback] Carried \(carry.samples.count) unplayed frames of \(carry.itemId) across the rebuild")
+        }
         startPolling()
         ovLog("[AudioPlayback] Ring-buffer player started (rate \(Int(rate)) Hz, shared engine: \(!ownsEngine))")
     }
@@ -459,7 +492,17 @@ final class AudioPlaybackService: ObservableObject, RealtimePlaybackSink {
         // only `isRunning` missed exactly that case (capture's own recovery restarts the engine
         // first, so the player looked healthy while its source node was gone and she went mute).
         let detached = sourceNode?.engine == nil || mixerNode?.engine == nil
-        guard detached || sharedEngine !== engine || !sharedEngine.isRunning else { return }
+        // The route settling at session start stops the engine briefly. Restarting it keeps the
+        // graph — and the queued reply — intact; rebuilding here is what made the FIRST reply of
+        // a session silent while every later one was fine.
+        if !detached && sharedEngine === engine {
+            if !sharedEngine.isRunning {
+                sharedEngine.prepare()
+                try? sharedEngine.start()
+                ovLog("[AudioPlayback] Engine restarted after a route settle (graph kept, \(Int(bufferedMs)) ms buffered)")
+            }
+            return
+        }
         ovLog("[AudioPlayback] Rebuilding the player graph (detached: \(detached), running: \(sharedEngine.isRunning))")
         try? setup(engine: sharedEngine)
     }
@@ -533,6 +576,26 @@ final class AudioPlaybackService: ObservableObject, RealtimePlaybackSink {
         isPlaying = false
         guard let head, let itemId = itemIds[head.handle] else { return nil }
         return (itemId, playedMs(fromFrames: head.rendered))
+    }
+
+    /// The first reply of a session is the one that gets lost: the `.playAndRecord` route is still
+    /// settling when it arrives, so the engine may be stopped or the graph rebuilt underneath it.
+    /// Verify — and repair — engine + graph BEFORE its deltas are enqueued, and say so in the log.
+    func ensureReadyForPlayback(firstOfSession: Bool) {
+        let live = engine
+        let attached = sourceNode?.engine != nil && mixerNode?.engine != nil
+        let running = live?.isRunning ?? false
+        if firstOfSession {
+            ovLog("[AudioPlayback] First reply of the session — engine running: \(running), graph attached: \(attached), route: \(AudioSessionManager.shared.routeInfo.tag)")
+        }
+        guard !running || !attached else { return }
+        ovLog("[AudioPlayback] ⚠︎ speaker not ready before the reply (running: \(running), attached: \(attached)) — repairing")
+        if !attached {
+            try? setup(engine: live)
+        } else if let live, !running {
+            live.prepare()
+            try? live.start()
+        }
     }
 
     func duck(_ ducked: Bool) {
