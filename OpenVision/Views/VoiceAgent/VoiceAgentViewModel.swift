@@ -961,8 +961,14 @@ final class VoiceAgentViewModel: ObservableObject {
         } catch {
             ovLog("[VoiceAgent] Full-duplex audio session failed: \(error)")
         }
+        // Bring the shared engine up BEFORE connecting: whether voice-processing IO actually
+        // engaged is only known once it is running, and the `?aec=` hint is decided at upgrade
+        // time (AUR-724b). `startSharedEngine` is idempotent — the call further down reuses this.
+        _ = try? AudioSessionManager.shared.startSharedEngine(voiceProcessing: true)
         liveRoute = AudioSessionManager.shared.routeInfo.tag
         openAIRealtime.routeTag = liveRoute
+        openAIRealtime.aecActive = AudioSessionManager.shared.clientAECActive
+        ovLog("[VoiceAgent] Live audio rig: \(liveRoute), client AEC: \(openAIRealtime.aecActive)")
 
         // Start glasses streaming (only when they're actually there — audio-only rigs skip it).
         if glassesManager.isRegistered, !glassesManager.isStreaming {
@@ -1008,6 +1014,8 @@ final class VoiceAgentViewModel: ObservableObject {
             guard let self else { return }
             self.liveRoute = info.tag
             self.openAIRealtime.routeTag = info.tag
+            // A route that moves the mic to the glasses withdraws the AEC claim (and back again).
+            self.openAIRealtime.aecActive = AudioSessionManager.shared.clientAECActive
         }
 
         // Setup audio playback (ring buffer with pause / flush / played-ms accounting)

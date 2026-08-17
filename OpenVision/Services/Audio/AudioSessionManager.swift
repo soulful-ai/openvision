@@ -263,6 +263,22 @@ final class AudioSessionManager {
         }
     }
 
+    /// AUR-724b — may we tell the brain "this client cancels its own echo"?
+    ///
+    /// Only when the PHONE is doing the cancelling: voice-processing IO is on AND the mic is one
+    /// the VPIO unit actually owns (the built-in mic, or a wired headset mic on the same IO).
+    /// A Bluetooth mic is NOT covered — with the glasses' mic the echo path is their speaker into
+    /// their own mic, which the phone's VPIO never sees. Claiming AEC there would make the server
+    /// drop its echo-level gate and start barging in on its own voice, so the honest answer is no.
+    var clientAECActive: Bool {
+        guard voiceProcessingEnabled else { return false }
+        guard let input = audioSession.currentRoute.inputs.first else { return false }
+        switch input.portType {
+        case .builtInMic, .headsetMic: return true
+        default: return false   // bluetoothHFP / bluetoothLE / anything else: not ours to claim
+        }
+    }
+
     /// Snapshot of the live route.
     var routeInfo: RouteInfo {
         let route = audioSession.currentRoute

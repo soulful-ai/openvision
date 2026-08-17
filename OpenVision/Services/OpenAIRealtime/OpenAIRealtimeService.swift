@@ -98,6 +98,19 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
     /// Route tag reported to the brain in `session.update.metadata.route` ("a2dp+phone-mic", …).
     var routeTag: String = "unknown"
 
+    /// AUR-724b: "this client cancels its own echo" (iOS VPIO). The brain drops its echo-level
+    /// gate when this is true and leans on text-based self-echo rejection instead, which makes
+    /// talk-over markedly more sensitive — so it must only be set when the PHONE really is the
+    /// one cancelling (see `AudioSessionManager.clientAECActive`). A route change that hands the
+    /// mic to the glasses flips it back off mid-session.
+    var aecActive: Bool = false {
+        didSet {
+            guard aecActive != oldValue else { return }
+            ovLog("[OpenAIRealtime] AEC hint changed → \(aecActive) (route \(routeTag))")
+            sendClientMetadata()
+        }
+    }
+
     // MARK: - WebSocket
 
     private var webSocket: URLSessionWebSocketTask?
@@ -256,6 +269,8 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
         // The brain uses `?lang=` as the STT/TTS language hint (ru-RU for Margo's rig).
         let locale = settings.speechLocaleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
         if !locale.isEmpty { items.append(URLQueryItem(name: "lang", value: locale)) }
+        // AUR-724b: declared at upgrade so the very first turn already runs without the echo gate.
+        items.append(URLQueryItem(name: "aec", value: aecActive ? "1" : "0"))
         if let resume, !resume.isEmpty { items.append(URLQueryItem(name: "resume", value: resume)) }
         components?.queryItems = items
         return components?.url
@@ -297,7 +312,8 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
                 "metadata": [
                     "client": Constants.RealtimeAudio.clientTag,
                     "proto": Constants.RealtimeAudio.protocolTag,
-                    "route": routeTag
+                    "route": routeTag,
+                    "aec": aecActive
                 ],
                 "audio": [
                     "input": [
@@ -352,6 +368,23 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
             }
         }
         return prompt
+    }
+
+    /// Re-declare the client hints mid-session (route change flipped AEC, mic moved to the
+    /// glasses, …). Metadata-only: the server applies just the keys present.
+    private func sendClientMetadata() {
+        guard connectionState.isUsable else { return }
+        send([
+            "type": "session.update",
+            "session": [
+                "metadata": [
+                    "client": Constants.RealtimeAudio.clientTag,
+                    "proto": Constants.RealtimeAudio.protocolTag,
+                    "route": routeTag,
+                    "aec": aecActive
+                ]
+            ]
+        ])
     }
 
     // MARK: - Send Audio
