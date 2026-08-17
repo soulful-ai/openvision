@@ -1041,14 +1041,17 @@ final class VoiceAgentViewModel: ObservableObject {
             }
         }
 
+        isLiveVideoMode = true
+        agentState = .liveVideo
+
         // AUR-723b: glasses first, phone camera otherwise — and keep following that as the
-        // glasses come and go mid-session.
+        // glasses come and go mid-session. MUST run AFTER `isLiveVideoMode = true`:
+        // `updateLiveCameraSource` guards on it, so starting the eye any earlier silently did
+        // nothing and the session sent zero frames (measured on the phone rig 2026-08-17 —
+        // `/admin/rt-sessions` showed the live ru-RU session answering with 0 `vision:` lines).
         phoneCameraDeniedAnnounced = false
         await updateLiveCameraSource()
         watchCameraSource()
-
-        isLiveVideoMode = true
-        agentState = .liveVideo
 
         print("[VoiceAgent] ✓ Live video mode active - \(label) handling audio + video")
 
