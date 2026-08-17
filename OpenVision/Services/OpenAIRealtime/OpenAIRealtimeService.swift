@@ -211,7 +211,7 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
             onConnectionStateChanged?(connectionState)
             startPinging()
             flushOfflineAudio()
-            print("[OpenAIRealtime] Connected socket #\(generation) (session \(sessionId ?? "?"), resumed: \(resuming), route \(routeTag))")
+            ovLog("[OpenAIRealtime] Connected socket #\(generation) (session \(sessionId ?? "?"), resumed: \(resuming), route \(routeTag))")
 
         } catch {
             lastError = error.localizedDescription
@@ -224,7 +224,7 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
 
     func disconnect() async {
         guard connectionState != .disconnected else { return }
-        print("[OpenAIRealtime] Disconnecting")
+        ovLog("[OpenAIRealtime] Disconnecting")
         intentionalClose = true
         reconnectTask?.cancel(); reconnectTask = nil
         connectionState = .disconnected
@@ -382,7 +382,7 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
         guard !offlineAudio.isEmpty else { return }
         let frames = offlineAudio
         offlineAudio.removeAll(); offlineAudioBytes = 0
-        print("[OpenAIRealtime] Replaying \(frames.count) mic frames captured during the reconnect")
+        ovLog("[OpenAIRealtime] Replaying \(frames.count) mic frames captured during the reconnect")
         for frame in frames {
             let message: [String: Any] = [
                 "type": "input_audio_buffer.append",
@@ -451,7 +451,7 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
                     // superseded socket's error tore down its replacement and scheduled another
                     // reconnect — a self-sustaining leak of live sessions.
                     guard !Task.isCancelled, self.socketGeneration == generation else { break }
-                    print("[OpenAIRealtime] Receive error on socket #\(generation): \(error)")
+                    ovLog("[OpenAIRealtime] Receive error on socket #\(generation): \(error)")
                     await self.handleDisconnect(error: error)
                     break
                 }
@@ -489,7 +489,7 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
                 try await sendSessionUpdate()
                 isSessionReady = true
             } catch {
-                print("[OpenAIRealtime] session.update failed: \(error)")
+                ovLog("[OpenAIRealtime] session.update failed: \(error)")
             }
 
         case "session.updated":
@@ -497,14 +497,24 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
 
         // ── AUR-724 barge-in stage 1: the wearer started talking ──────────────────────────────
         case "input_audio_buffer.speech_started":
-            onsetAt = Date()
-            // Pause immediately and KEEP the buffer: the server has up to ~400 ms to confirm
-            // this was speech and not the echo of the reply. A false alarm resumes below.
-            playback?.pausePlayback()
-            playback?.duck(true)
+            // NOTE: this fires on EVERY utterance onset, not only over a playing reply
+            // (channel.ts `speechStarted` sends it before it even checks for a turn). When
+            // nothing is playing there is no turn to false-alarm on, so no `aurelia.playback.
+            // resume` will ever follow — pausing unconditionally wedged the player shut for the
+            // rest of the session and the next reply went into a paused ring (field bug: correct
+            // transcript on screen, silence in the ear). Pause only when there IS something in
+            // the ear; the player releases the pause itself if no verdict lands in ~700 ms.
             isProcessing = true
             if let itemId = json["item_id"] as? String, currentItemId == nil { currentItemId = itemId }
-            print("[OpenAIRealtime] ⏸ speech_started → playback paused")
+            let paused = playback?.pausePlayback() ?? false
+            if paused {
+                onsetAt = Date()
+                playback?.duck(true)
+                ovLog("[OpenAIRealtime] ⏸ speech_started → playback paused (reply in the ear)")
+            } else {
+                onsetAt = nil
+                ovLog("[OpenAIRealtime] speech_started with an idle player — utterance onset, nothing to pause")
+            }
 
         // ── stage 2a: confirmed → drop everything buffered and tell her what was heard ────────
         case "output_audio_buffer.cleared":
@@ -516,18 +526,22 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
             playback?.resumePlayback()
             let waited = onsetAt.map { Int(Date().timeIntervalSince($0) * 1000) } ?? -1
             onsetAt = nil
-            print("[OpenAIRealtime] ▶︎ playback.resume (false alarm after \(waited) ms)")
+            ovLog("[OpenAIRealtime] ▶︎ playback.resume (false alarm after \(waited) ms)")
 
         // ── AUR-728: the pod is going away — reconnect on the hint, keep the session ──────────
         case "aurelia.server.draining":
             if let id = json["session_id"] as? String { sessionId = id }
             let resumeInMs = (json["resume_in_ms"] as? Double) ?? 1500
-            print("[OpenAIRealtime] Server draining — resuming session \(sessionId ?? "?") in \(Int(resumeInMs)) ms")
+            ovLog("[OpenAIRealtime] Server draining — resuming session \(sessionId ?? "?") in \(Int(resumeInMs)) ms")
             scheduleReconnect(afterMs: resumeInMs, reason: "draining")
 
         case "response.created":
             isProcessing = true
             truncatedItems.removeAll()
+            // A fresh reply always starts audible: any pause/duck left over from the onset that
+            // triggered THIS turn belongs to the previous response, not to this one.
+            playback?.resumePlayback()
+            onsetAt = nil
 
         case "response.output_item.added":
             if let item = json["item"] as? [String: Any], let id = item["id"] as? String {
@@ -579,11 +593,11 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
 
         case "conversation.item.truncated":
             let heard = (json["heard_prefix"] as? String) ?? ""
-            print("[OpenAIRealtime] Truncate acknowledged (heard \(heard.count) chars)")
+            ovLog("[OpenAIRealtime] Truncate acknowledged (heard \(heard.count) chars)")
 
         case "error":
             let detail = ((json["error"] as? [String: Any])?["message"] as? String) ?? "unknown error"
-            print("[OpenAIRealtime] Server error: \(detail)")
+            ovLog("[OpenAIRealtime] Server error: \(detail)")
             lastError = detail
             // AUR-729 client half: never leave the UI stuck "thinking" on a server error.
             isProcessing = false
@@ -605,7 +619,7 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
         onsetAt = nil
         isModelSpeaking = false
 
-        print("[OpenAIRealtime] ✂︎ flush on \(trigger) — ear silent \(latency) ms after onset, played \(Int(playedMs)) ms")
+        ovLog("[OpenAIRealtime] ✂︎ flush on \(trigger) — ear silent \(latency) ms after onset, played \(Int(playedMs)) ms")
 
         guard let target, !truncatedItems.contains(target) else { return }
         truncatedItems.insert(target)
@@ -660,7 +674,7 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
         guard !intentionalClose else { return }
         guard reconnectTask == nil else { return }
         guard reconnectAttempt < Constants.RealtimeAudio.reconnectMaxAttempts else {
-            print("[OpenAIRealtime] Giving up after \(reconnectAttempt) reconnect attempts")
+            ovLog("[OpenAIRealtime] Giving up after \(reconnectAttempt) reconnect attempts")
             connectionState = .failed("connection lost")
             onConnectionStateChanged?(connectionState)
             onDisconnected?()
@@ -672,7 +686,7 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
         let delay = (afterMs.map { $0 / 1000 } ?? backoff)
         connectionState = .reconnecting(attempt: reconnectAttempt)
         onConnectionStateChanged?(connectionState)
-        print("[OpenAIRealtime] Reconnect #\(reconnectAttempt) in \(String(format: "%.2f", delay))s (\(reason))")
+        ovLog("[OpenAIRealtime] Reconnect #\(reconnectAttempt) in \(String(format: "%.2f", delay))s (\(reason))")
 
         reconnectTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(max(0, delay) * 1_000_000_000))
@@ -689,9 +703,9 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
         do {
             try await openSocket(resuming: true)
             reconnectAttempt = 0
-            print("[OpenAIRealtime] ✓ Session resumed (\(sessionId ?? "?"))")
+            ovLog("[OpenAIRealtime] ✓ Session resumed (\(sessionId ?? "?"))")
         } catch {
-            print("[OpenAIRealtime] Reconnect failed: \(error)")
+            ovLog("[OpenAIRealtime] Reconnect failed: \(error)")
             scheduleReconnect(afterMs: nil, reason: "retry")
         }
     }

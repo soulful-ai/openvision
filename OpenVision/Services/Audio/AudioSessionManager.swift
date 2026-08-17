@@ -68,7 +68,7 @@ final class AudioSessionManager {
         }
 
         currentMode = mode
-        print("[AudioSession] Configured for \(mode)")
+        ovLog("[AudioSession] Configured for \(mode)")
     }
 
     /// Deactivate audio session
@@ -147,12 +147,12 @@ final class AudioSessionManager {
 
         // Now that HFP is allowed + the session is active, the glasses mic should be listed.
         guard let hfpInput = findBluetoothHFPInput() else {
-            print("[AudioSession] No Bluetooth HFP input — glasses not connected as an audio device. Inputs: \(availableInputsDescription)")
+            ovLog("[AudioSession] No Bluetooth HFP input — glasses not connected as an audio device. Inputs: \(availableInputsDescription)")
             return false
         }
         try audioSession.setPreferredInput(hfpInput)
         currentMode = .voiceChat
-        print("[AudioSession] ✓ Configured for glasses (Bluetooth HFP): \(hfpInput.portName) — route: \(currentRouteDescription)")
+        ovLog("[AudioSession] ✓ Configured for glasses (Bluetooth HFP): \(hfpInput.portName) — route: \(currentRouteDescription)")
         return true
     }
 
@@ -178,7 +178,7 @@ final class AudioSessionManager {
             try? audioSession.overrideOutputAudioPort(.speaker)
         }
         currentMode = .voiceChat
-        print("[AudioSession] Configured for phone (built-in mic + loud speaker)")
+        ovLog("[AudioSession] Configured for phone (built-in mic + loud speaker)")
     }
 
     /// Find Bluetooth HFP input port
@@ -298,7 +298,7 @@ final class AudioSessionManager {
         if preferGlassesMic, let hfp = findBluetoothHFPInput() {
             try? audioSession.setPreferredInput(hfp)
             usingGlasses = true
-            print("[AudioSession] Full duplex on the glasses mic (HFP): \(hfp.portName)")
+            ovLog("[AudioSession] Full duplex on the glasses mic (HFP): \(hfp.portName)")
         } else {
             // Explicitly release any pinned input so iOS picks the built-in mic and playback can
             // stay on A2DP.
@@ -308,7 +308,7 @@ final class AudioSessionManager {
             }
         }
         currentMode = .voiceChat
-        print("[AudioSession] Full duplex configured — route: \(routeInfo.description)")
+        ovLog("[AudioSession] Full duplex configured — route: \(routeInfo.description)")
         return usingGlasses
     }
 
@@ -327,10 +327,10 @@ final class AudioSessionManager {
             do {
                 try input.setVoiceProcessingEnabled(true)
                 voiceProcessingEnabled = true
-                print("[AudioSession] Voice-processing IO (AEC/AGC/NS) enabled on the input node")
+                ovLog("[AudioSession] Voice-processing IO (AEC/AGC/NS) enabled on the input node")
             } catch {
                 voiceProcessingEnabled = false
-                print("[AudioSession] Voice processing unavailable on this route: \(error)")
+                ovLog("[AudioSession] Voice processing unavailable on this route: \(error)")
             }
         } else {
             voiceProcessingEnabled = false
@@ -341,7 +341,7 @@ final class AudioSessionManager {
         try engine.start()
         sharedEngine = engine
         installRouteObservers()
-        print("[AudioSession] Shared engine started — input \(input.outputFormat(forBus: 0).sampleRate) Hz, route \(routeInfo.description)")
+        ovLog("[AudioSession] Shared engine started — input \(input.outputFormat(forBus: 0).sampleRate) Hz, route \(routeInfo.description)")
         return engine
     }
 
@@ -384,7 +384,7 @@ final class AudioSessionManager {
         let info = RouteInfo(inputPort: routeInfo.inputPort, inputType: routeInfo.inputType,
                              outputPort: routeInfo.outputPort, outputType: routeInfo.outputType,
                              sampleRate: routeInfo.sampleRate, reason: String(describing: reason))
-        print("[AudioSession] Route change (\(info.reason)) → \(info.description)")
+        ovLog("[AudioSession] Route change (\(info.reason)) → \(info.description)")
         // The route moved (BT connected/lost, HFP<->A2DP): the engine keeps running, but the input
         // format may have changed — the capture tap is reinstalled by the callback.
         onRouteChange?(info)
@@ -392,7 +392,7 @@ final class AudioSessionManager {
     }
 
     private func handleEngineConfigurationChange() {
-        print("[AudioSession] AVAudioEngine configuration change — rebuilding taps")
+        ovLog("[AudioSession] AVAudioEngine configuration change — rebuilding taps")
         onEngineConfigurationChange?()
     }
 
@@ -400,9 +400,9 @@ final class AudioSessionManager {
         guard let type else { return }
         switch type {
         case .began:
-            print("[AudioSession] Interruption began (call/Siri)")
+            ovLog("[AudioSession] Interruption began (call/Siri)")
         case .ended:
-            print("[AudioSession] Interruption ended — reactivating")
+            ovLog("[AudioSession] Interruption ended — reactivating")
             try? audioSession.setActive(true)
             onEngineConfigurationChange?()
         @unknown default:

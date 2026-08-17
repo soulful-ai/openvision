@@ -209,14 +209,14 @@ final class VoiceAgentViewModel: ObservableObject {
     }
 
     func voiceStateChanged(_ newState: VoiceCommandService.ListeningState) {
-        print("[VoiceAgent] VoiceCommandService state changed to: \(newState)")
+        ovLog("[VoiceAgent] VoiceCommandService state changed to: \(newState)")
         switch newState {
         case .idle:
             // In live video mode, a silence timeout must NOT end the mode — the user expects
             // to keep asking questions (camera stays on) until they say "stop video". Re-arm
             // conversation mode so the next question is heard without a fresh wake word.
             if isLiveVideoMode {
-                print("[VoiceAgent] Idle during live video — re-arming conversation mode")
+                ovLog("[VoiceAgent] Idle during live video — re-arming conversation mode")
                 voiceCommandService.enterConversationMode()
                 agentState = .liveVideo
                 return
@@ -229,7 +229,7 @@ final class VoiceAgentViewModel: ObservableObject {
             // face/camera command: the restart flipped to .idle during .thinking and killed the
             // session, so the post-reply audio rebuild never ran.)
             if isSessionActive && agentState == .listening {
-                print("[VoiceAgent] Voice service idle, stopping session")
+                ovLog("[VoiceAgent] Voice service idle, stopping session")
                 isSessionActive = false
                 agentState = .idle
                 // Disconnect AI backend
@@ -323,7 +323,7 @@ final class VoiceAgentViewModel: ObservableObject {
                     try await GeminiLiveService.shared.connect()
                     // Start glasses streaming for Gemini Live mode
                     if glassesManager.isRegistered && !glassesManager.isStreaming {
-                        print("[VoiceAgent] Starting glasses stream for Gemini Live...")
+                        ovLog("[VoiceAgent] Starting glasses stream for Gemini Live...")
                         await glassesManager.startStreaming()
                     }
 
@@ -383,7 +383,7 @@ final class VoiceAgentViewModel: ObservableObject {
         }
         // Glasses mic off, glasses not connected as audio, or no HFP input available → phone.
         // Loud speaker so spoken replies are audible (not the quiet earpiece).
-        print("[VoiceAgent] Using iPhone mic + speaker (glasses mic off or unavailable)")
+        ovLog("[VoiceAgent] Using iPhone mic + speaker (glasses mic off or unavailable)")
         try? AudioSessionManager.shared.configureForPhone()
         return false
     }
@@ -433,7 +433,7 @@ final class VoiceAgentViewModel: ObservableObject {
 
             // Stop glasses streaming (turns off LED)
             if glassesManager.isStreaming {
-                print("[VoiceAgent] Stopping glasses stream...")
+                ovLog("[VoiceAgent] Stopping glasses stream...")
                 await glassesManager.stopStreaming()
             }
         }
@@ -502,9 +502,9 @@ final class VoiceAgentViewModel: ObservableObject {
         Task {
             do {
                 try await GemmaLocalService.shared.connect(modelId: settingsManager.settings.localGemmaModelId)
-                print("[VoiceAgent] Local model preloaded — wake word will be instant")
+                ovLog("[VoiceAgent] Local model preloaded — wake word will be instant")
             } catch {
-                print("[VoiceAgent] Local model preload failed: \(error.localizedDescription)")
+                ovLog("[VoiceAgent] Local model preload failed: \(error.localizedDescription)")
             }
         }
     }
@@ -516,17 +516,17 @@ final class VoiceAgentViewModel: ObservableObject {
 
         let authorized = await voiceCommandService.requestAuthorization()
         if authorized {
-            print("[VoiceAgent] Speech recognition authorized")
+            ovLog("[VoiceAgent] Speech recognition authorized")
             startWakeWordListening()
         } else {
-            print("[VoiceAgent] Speech recognition not authorized")
+            ovLog("[VoiceAgent] Speech recognition not authorized")
             errorMessage = "Speech recognition not authorized. Please enable in Settings."
         }
     }
 
     /// Setup voice command service callbacks
     private func setupVoiceCommandService() {
-        print("[VoiceAgent] Setting up voice command callbacks")
+        ovLog("[VoiceAgent] Setting up voice command callbacks")
 
         // Allow wake word to interrupt TTS (for "ok vision stop")
         voiceCommandService.shouldAllowInterrupt = { [weak self] in
@@ -536,13 +536,13 @@ final class VoiceAgentViewModel: ObservableObject {
         // Wake word detected
         voiceCommandService.onWakeWordDetected = { [weak self] in
             guard let self else { return }
-            print("[VoiceAgent] Wake word detected!")
+            ovLog("[VoiceAgent] Wake word detected!")
             HapticFeedback.medium()
             self.soundService.playWakeWordSound()
 
             // If TTS is speaking, stop it immediately (interrupt)
             if self.ttsService.isSpeaking {
-                print("[VoiceAgent] Stopping TTS due to wake word interrupt")
+                ovLog("[VoiceAgent] Stopping TTS due to wake word interrupt")
                 self.ttsService.stop()
                 self.ttsStreaming = false   // keep flag in sync with the cleared stream
                 KokoroTTSService.shared.stop()
@@ -556,7 +556,7 @@ final class VoiceAgentViewModel: ObservableObject {
             // Auto-start session if not already active (use Task to avoid blocking)
             Task { @MainActor in
                 if !self.isSessionActive && self.settingsManager.settings.isCurrentBackendConfigured {
-                    print("[VoiceAgent] Starting session from wake word...")
+                    ovLog("[VoiceAgent] Starting session from wake word...")
                     self.startSession()
                 }
             }
@@ -565,19 +565,19 @@ final class VoiceAgentViewModel: ObservableObject {
         // "Ok Vision stop" during a reply → full stop, go quiet (the recognizer is already reset
         // to wake-word idle by VoiceCommandService; here we just halt output + end the turn).
         voiceCommandService.onStopCommand = { [weak self] in
-            print("[VoiceAgent] Full stop requested")
+            ovLog("[VoiceAgent] Full stop requested")
             self?.performFullStop()
         }
 
         // Command captured
         voiceCommandService.onCommandCaptured = { [weak self] (command: String) in
             guard let self else { return }
-            print("[VoiceAgent] Command captured: \(command)")
+            ovLog("[VoiceAgent] Command captured: \(command)")
 
             // IMPORTANT: Only process commands when session is active
             // This prevents processing stale commands after session ends
             guard self.isSessionActive else {
-                print("[VoiceAgent] Ignoring command - session not active")
+                ovLog("[VoiceAgent] Ignoring command - session not active")
                 return
             }
 
@@ -597,7 +597,7 @@ final class VoiceAgentViewModel: ObservableObject {
         // Barge-in (user interrupts AI)
         voiceCommandService.onInterruption = { [weak self] in
             guard let self else { return }
-            print("[VoiceAgent] Barge-in detected")
+            ovLog("[VoiceAgent] Barge-in detected")
 
             // Stop TTS immediately
             self.ttsService.stop()
@@ -626,17 +626,17 @@ final class VoiceAgentViewModel: ObservableObject {
             // In live video mode, silence must not end the session — the .idle state handler
             // re-arms conversation mode so the user can keep asking until they say "stop video".
             if self.isLiveVideoMode {
-                print("[VoiceAgent] Conversation timeout during live video — staying live")
+                ovLog("[VoiceAgent] Conversation timeout during live video — staying live")
                 return
             }
-            print("[VoiceAgent] Conversation timeout - returning to idle")
+            ovLog("[VoiceAgent] Conversation timeout - returning to idle")
             self.stopSession()
         }
 
         // Setup AI service callbacks for responses
         setupAIServiceCallbacks()
 
-        print("[VoiceAgent] Voice command callbacks setup complete")
+        ovLog("[VoiceAgent] Voice command callbacks setup complete")
     }
 
     /// Setup AI service callbacks for receiving responses
@@ -708,7 +708,7 @@ final class VoiceAgentViewModel: ObservableObject {
         // OpenClaw extras: tool status + device-side tool calls.
         OpenClawService.shared.onToolStatusChanged = { [weak self] (toolName: String?, isRunning: Bool) in
             guard let self else { return }
-            print("[VoiceAgent] Tool status: \(toolName ?? "none"), running: \(isRunning)")
+            ovLog("[VoiceAgent] Tool status: \(toolName ?? "none"), running: \(isRunning)")
             self.currentToolName = toolName
             if isRunning {
                 self.agentState = .toolRunning
@@ -718,7 +718,7 @@ final class VoiceAgentViewModel: ObservableObject {
         // Handle tool calls (e.g., take_photo)
         OpenClawService.shared.onToolCall = { [weak self] (toolName: String, args: [String: Any], completion: @escaping (String) -> Void) in
             guard let self else { return }
-            print("[VoiceAgent] Tool call: \(toolName) with args: \(args)")
+            ovLog("[VoiceAgent] Tool call: \(toolName) with args: \(args)")
 
             switch toolName {
             case "take_photo", "capture_photo", "take_picture":
@@ -734,7 +734,7 @@ final class VoiceAgentViewModel: ObservableObject {
                 }
 
             default:
-                print("[VoiceAgent] Unknown tool: \(toolName)")
+                ovLog("[VoiceAgent] Unknown tool: \(toolName)")
                 completion("Tool '\(toolName)' is not available on this device.")
             }
         }
@@ -764,9 +764,9 @@ final class VoiceAgentViewModel: ObservableObject {
         do {
             try voiceCommandService.startListening()
             isVoiceReady = true
-            print("[VoiceAgent] Started wake word listening - READY")
+            ovLog("[VoiceAgent] Started wake word listening - READY")
         } catch {
-            print("[VoiceAgent] Failed to start listening: \(error)")
+            ovLog("[VoiceAgent] Failed to start listening: \(error)")
             errorMessage = error.localizedDescription
         }
     }
@@ -786,7 +786,7 @@ final class VoiceAgentViewModel: ObservableObject {
                            && !lowerCommand.contains("видео") && !lowerCommand.contains("стрим")
 
         if isStopCommand {
-            print("[VoiceAgent] Stop command detected - full stop")
+            ovLog("[VoiceAgent] Stop command detected - full stop")
             performFullStop()
             return
         }
@@ -810,13 +810,13 @@ final class VoiceAgentViewModel: ObservableObject {
 
         // Handle live video mode commands
         if isStartLiveCommand {
-            print("[VoiceAgent] Starting live video mode...")
+            ovLog("[VoiceAgent] Starting live video mode...")
             await startLiveVideoMode()
             return
         }
 
         if isStopLiveCommand {
-            print("[VoiceAgent] Stopping live video mode...")
+            ovLog("[VoiceAgent] Stopping live video mode...")
             await stopLiveVideoMode()
             return
         }
@@ -833,7 +833,7 @@ final class VoiceAgentViewModel: ObservableObject {
                 do {
                     try await geminiLive.sendText(command)
                 } catch {
-                    print("[VoiceAgent] Failed to send to Gemini Live: \(error)")
+                    ovLog("[VoiceAgent] Failed to send to Gemini Live: \(error)")
                 }
             }
             return
@@ -845,7 +845,7 @@ final class VoiceAgentViewModel: ObservableObject {
         // the previous answer is generating/speaking.
         let now = Date()
         if command == lastProcessedCommand, now.timeIntervalSince(lastProcessedAt) < 4 {
-            print("[VoiceAgent] Ignoring duplicate command within 4s: \(command)")
+            ovLog("[VoiceAgent] Ignoring duplicate command within 4s: \(command)")
             return
         }
         lastProcessedCommand = command
@@ -882,7 +882,7 @@ final class VoiceAgentViewModel: ObservableObject {
                 // routes faces, web search, native tools, or answers.
                 await handleLocalCommand(command, llm: llm, isPhotoCommand: isPhotoCommand)
             } else if isPhotoCommand && backend.supportsImageInput {
-                print("[VoiceAgent] Photo command on \(backend.backendType.displayName) — capturing...")
+                ovLog("[VoiceAgent] Photo command on \(backend.backendType.displayName) — capturing...")
                 await captureAndSendPhoto(withPrompt: command)
             } else {
                 try await backend.sendMessage(command, imageData: nil)
@@ -903,7 +903,7 @@ final class VoiceAgentViewModel: ObservableObject {
     /// Start live video mode - Gemini handles both audio and video
     private func startLiveVideoMode() async {
         guard !isLiveVideoMode else {
-            print("[VoiceAgent] Already in live video mode")
+            ovLog("[VoiceAgent] Already in live video mode")
             return
         }
 
@@ -933,7 +933,7 @@ final class VoiceAgentViewModel: ObservableObject {
         }
         activeLiveService = service
 
-        print("[VoiceAgent] Starting live video mode via \(label)...")
+        ovLog("[VoiceAgent] Starting live video mode via \(label)...")
 
         // Stop VoiceCommandService - the live backend will handle audio directly
         voiceCommandService.stopListening()
@@ -959,7 +959,7 @@ final class VoiceAgentViewModel: ObservableObject {
         do {
             try AudioSessionManager.shared.configureFullDuplex(preferGlassesMic: wantsGlassesMic)
         } catch {
-            print("[VoiceAgent] Full-duplex audio session failed: \(error)")
+            ovLog("[VoiceAgent] Full-duplex audio session failed: \(error)")
         }
         liveRoute = AudioSessionManager.shared.routeInfo.tag
         openAIRealtime.routeTag = liveRoute
@@ -983,7 +983,7 @@ final class VoiceAgentViewModel: ObservableObject {
                 try voiceCommandService.startListening()
                 voiceCommandService.enterConversationMode()
             } catch {
-                print("[VoiceAgent] Failed to restart voice commands: \(error)")
+                ovLog("[VoiceAgent] Failed to restart voice commands: \(error)")
             }
             return
         }
@@ -1014,7 +1014,7 @@ final class VoiceAgentViewModel: ObservableObject {
         do {
             try audioPlayback.setup(engine: sharedEngine)
         } catch {
-            print("[VoiceAgent] Failed to setup audio playback: \(error)")
+            ovLog("[VoiceAgent] Failed to setup audio playback: \(error)")
         }
 
         // The realtime service drives playback directly (item ids + barge-in flush); the legacy
@@ -1053,7 +1053,7 @@ final class VoiceAgentViewModel: ObservableObject {
         await updateLiveCameraSource()
         watchCameraSource()
 
-        print("[VoiceAgent] ✓ Live video mode active - \(label) handling audio + video")
+        ovLog("[VoiceAgent] ✓ Live video mode active - \(label) handling audio + video")
 
         // Announce to user
         ttsService.speak("Live video mode active")
@@ -1081,7 +1081,7 @@ final class VoiceAgentViewModel: ObservableObject {
     /// each spoken question is answered against the latest frame (see sendCommand). Replies
     /// speak through the selected TTS engine as usual.
     private func startLocalLiveVideoMode() async {
-        print("[VoiceAgent] Starting local live video mode (SmolVLM2)...")
+        ovLog("[VoiceAgent] Starting local live video mode (SmolVLM2)...")
 
         if !glassesManager.isStreaming {
             await glassesManager.startStreaming()
@@ -1100,7 +1100,7 @@ final class VoiceAgentViewModel: ObservableObject {
         do {
             try voiceCommandService.startListening()
         } catch {
-            print("[VoiceAgent] Failed to restart STT on phone mic: \(error)")
+            ovLog("[VoiceAgent] Failed to restart STT on phone mic: \(error)")
         }
 
         // Stay in conversation mode so follow-ups don't need the wake word.
@@ -1109,7 +1109,7 @@ final class VoiceAgentViewModel: ObservableObject {
         isLiveVideoMode = true
         agentState = .liveVideo
 
-        print("[VoiceAgent] ✓ Local live video mode active - SmolVLM2 answering on latest frame")
+        ovLog("[VoiceAgent] ✓ Local live video mode active - SmolVLM2 answering on latest frame")
         ttsService.speak("Live video mode active, on device")
     }
 
@@ -1129,7 +1129,7 @@ final class VoiceAgentViewModel: ObservableObject {
             let prompt = visionPromptFromCommand(command)
             try await GemmaLocalService.shared.sendMessage(prompt, imageData: jpeg)
         } catch {
-            print("[VoiceAgent] Local live video inference failed: \(error)")
+            ovLog("[VoiceAgent] Local live video inference failed: \(error)")
             speakResponse("Sorry, that didn't work. \(error.localizedDescription)")
         }
         if isLiveVideoMode { agentState = .liveVideo }
@@ -1156,11 +1156,11 @@ final class VoiceAgentViewModel: ObservableObject {
     /// Stop live video mode
     private func stopLiveVideoMode() async {
         guard isLiveVideoMode else {
-            print("[VoiceAgent] Not in live video mode")
+            ovLog("[VoiceAgent] Not in live video mode")
             return
         }
 
-        print("[VoiceAgent] Stopping live video mode...")
+        ovLog("[VoiceAgent] Stopping live video mode...")
 
         // Stop audio capture
         audioCapture.stopCapture()
@@ -1206,16 +1206,16 @@ final class VoiceAgentViewModel: ObservableObject {
             if isSessionActive {
                 // Continue conversation mode if session was active
                 voiceCommandService.enterConversationMode()
-                print("[VoiceAgent] Restarted voice commands in conversation mode")
+                ovLog("[VoiceAgent] Restarted voice commands in conversation mode")
             } else {
                 // Just listen for wake word
-                print("[VoiceAgent] Restarted voice commands for wake word detection")
+                ovLog("[VoiceAgent] Restarted voice commands for wake word detection")
             }
         } catch {
-            print("[VoiceAgent] Failed to restart voice commands: \(error)")
+            ovLog("[VoiceAgent] Failed to restart voice commands: \(error)")
         }
 
-        print("[VoiceAgent] Live video mode stopped")
+        ovLog("[VoiceAgent] Live video mode stopped")
         ttsService.speak("Live video mode ended")
     }
 
@@ -1231,7 +1231,7 @@ final class VoiceAgentViewModel: ObservableObject {
             if phoneCamera.isRunning { phoneCamera.stop() }
             if liveCameraSource != .glasses {
                 liveCameraSource = .glasses
-                print("[VoiceAgent] Live eye: glasses")
+                ovLog("[VoiceAgent] Live eye: glasses")
             }
             return
         }
@@ -1251,7 +1251,7 @@ final class VoiceAgentViewModel: ObservableObject {
         switch await phoneCamera.start() {
         case .started:
             liveCameraSource = .phone
-            print("[VoiceAgent] Live eye: phone camera (no glasses streaming)")
+            ovLog("[VoiceAgent] Live eye: phone camera (no glasses streaming)")
         case .denied:
             liveCameraSource = .none
             announcePhoneCameraUnavailable("I can't see anything right now — camera access is off for OpenVision. Turn it on in Settings › OpenVision › Camera.")
@@ -1267,7 +1267,7 @@ final class VoiceAgentViewModel: ObservableObject {
         phoneCameraDeniedAnnounced = true
         aiTranscript = message
         errorMessage = message
-        print("[VoiceAgent] Phone camera unavailable: \(message)")
+        ovLog("[VoiceAgent] Phone camera unavailable: \(message)")
     }
 
     /// Follow glasses registration/streaming while live so the eye switches without a restart.
@@ -1313,7 +1313,7 @@ final class VoiceAgentViewModel: ObservableObject {
                 let isStopCommand = stopKeywords.contains { lowerText.contains($0) }
 
                 if isStopCommand && self.isLiveVideoMode {
-                    print("[VoiceAgent] Stop command detected in transcription: \(text)")
+                    ovLog("[VoiceAgent] Stop command detected in transcription: \(text)")
                     await self.stopLiveVideoMode()
                 }
             }
@@ -1338,7 +1338,7 @@ final class VoiceAgentViewModel: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 if self.isLiveVideoMode {
-                    print("[VoiceAgent] Live backend disconnected unexpectedly")
+                    ovLog("[VoiceAgent] Live backend disconnected unexpectedly")
                     await self.stopLiveVideoMode()
                 }
             }
@@ -1450,7 +1450,7 @@ final class VoiceAgentViewModel: ObservableObject {
             // SmolVLM2 handles photos fully on-device; other local models are text-only
             // (Gemma E2B's vision hit the jetsam limit — see GemmaLocalModel.supportsOnDeviceVision).
             if settingsManager.settings.aiBackend == .localGemma && GemmaLocalService.shared.visionReady {
-                print("[VoiceAgent] Photo command on local SmolVLM2 — capturing...")
+                ovLog("[VoiceAgent] Photo command on local SmolVLM2 — capturing...")
                 await captureAndSendPhoto(withPrompt: command)
                 return
             }
@@ -1586,7 +1586,7 @@ final class VoiceAgentViewModel: ObservableObject {
         // kept the LED on longer. freshLiveFrame() below already waits for the first real frame,
         // so drop the artificial delay entirely.
         if glassesManager.isRegistered && !glassesManager.isStreaming {
-            print("[VoiceAgent] Starting glasses camera stream for photo...")
+            ovLog("[VoiceAgent] Starting glasses camera stream for photo...")
             await glassesManager.startStreaming()
             startedStreamingForPhoto = true
         }
@@ -1626,7 +1626,7 @@ final class VoiceAgentViewModel: ObservableObject {
                 speakResponse("I couldn't get a photo from the glasses. Please try again.")
             }
         } catch {
-            print("[VoiceAgent] Failed to send: \(error)")
+            ovLog("[VoiceAgent] Failed to send: \(error)")
             errorMessage = "Failed to send: \(error.localizedDescription)"
             agentState = isSessionActive ? .listening : .idle
 
@@ -1695,7 +1695,7 @@ final class VoiceAgentViewModel: ObservableObject {
 
     /// Setup glasses callbacks to stream video to Gemini Vision
     private func setupGlassesCallbacks() {
-        print("[VoiceAgent] Setting up glasses video callbacks...")
+        ovLog("[VoiceAgent] Setting up glasses video callbacks...")
 
         // Connect video frames from glasses to Gemini Vision (for live feed)
         // Note: GeminiVisionService.sendVideoFrame already throttles to 1fps
@@ -1708,18 +1708,18 @@ final class VoiceAgentViewModel: ObservableObject {
             Task { @MainActor in
                 self.videoFrameCount += 1
                 if self.videoFrameCount % 30 == 0 {
-                    print("[VoiceAgent] Video frames processed: \(self.videoFrameCount)")
+                    ovLog("[VoiceAgent] Video frames processed: \(self.videoFrameCount)")
                 }
             }
         }
 
         // Photo captured callback (for OpenClaw photo analysis)
         glassesManager.onPhotoCaptured = { data in
-            print("[VoiceAgent] Photo captured: \(data.count) bytes")
+            ovLog("[VoiceAgent] Photo captured: \(data.count) bytes")
             // Photos are handled via OpenClaw's attachment system
         }
 
-        print("[VoiceAgent] Glasses callbacks configured")
+        ovLog("[VoiceAgent] Glasses callbacks configured")
     }
 
     // MARK: - TTS Integration
@@ -1816,7 +1816,7 @@ final class VoiceAgentViewModel: ObservableObject {
 
     /// Handle take_photo tool call
     private func handleTakePhotoTool(completion: @escaping (String) -> Void) async {
-        print("[VoiceAgent] Handling take_photo tool")
+        ovLog("[VoiceAgent] Handling take_photo tool")
 
         if glassesManager.isStreaming {
             // Capture from glasses
@@ -1865,7 +1865,7 @@ final class VoiceAgentViewModel: ObservableObject {
 
     /// Handle describe_scene tool call (uses Gemini Vision)
     private func handleDescribeSceneTool(args: [String: Any], completion: @escaping (String) -> Void) async {
-        print("[VoiceAgent] Handling describe_scene tool")
+        ovLog("[VoiceAgent] Handling describe_scene tool")
 
         let prompt = args["prompt"] as? String ?? "Please describe what you see in this image."
 

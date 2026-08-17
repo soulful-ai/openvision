@@ -123,7 +123,7 @@ final class PhoneCameraService: ObservableObject {
                 cont.resume()
             }
         }
-        print("[PhoneCamera] Started (\(Int(framesPerSecond)) fps, 640x480 rear)")
+        ovLog("[PhoneCamera] Started (\(Int(framesPerSecond)) fps, 640x480 rear)")
         return .started
     }
 
@@ -139,7 +139,7 @@ final class PhoneCameraService: ObservableObject {
             proxy.onFrame = nil
             if session.isRunning { session.stopRunning() }
         }
-        print("[PhoneCamera] Stopped")
+        ovLog("[PhoneCamera] Stopped")
     }
 
     /// True when the user has already refused the camera (so the app says it once, not per frame).

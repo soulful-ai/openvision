@@ -106,7 +106,7 @@ final class AudioCaptureChunker: @unchecked Sendable {
             return buffer
         }
         if status == .error || out.frameLength == 0 {
-            if let error { print("[AudioCapture] Convert failed: \(error)") }
+            if let error { ovLog("[AudioCapture] Convert failed: \(error)") }
             return nil
         }
         return out
@@ -179,7 +179,7 @@ final class AudioCaptureService: ObservableObject {
         isCapturing = true
         lastFrameAt = Date()
         startStallWatchdog()
-        print("[AudioCapture] Started (frame \(chunkDurationMs) ms → \(Int(targetSampleRate)) Hz PCM16, shared engine: \(!ownsEngine))")
+        ovLog("[AudioCapture] Started (frame \(chunkDurationMs) ms → \(Int(targetSampleRate)) Hz PCM16, shared engine: \(!ownsEngine))")
     }
 
     /// Stop capturing audio.
@@ -196,7 +196,7 @@ final class AudioCaptureService: ObservableObject {
         chunker?.flush()
         chunker = nil
         isCapturing = false
-        print("[AudioCapture] Stopped capturing")
+        ovLog("[AudioCapture] Stopped capturing")
     }
 
     /// Reinstall the tap after a route / engine-configuration change WITHOUT tearing the session
@@ -215,9 +215,9 @@ final class AudioCaptureService: ObservableObject {
                 try target.start()
             }
             lastFrameAt = Date()
-            print("[AudioCapture] Tap reinstalled — input now \(target.inputNode.outputFormat(forBus: 0).sampleRate) Hz")
+            ovLog("[AudioCapture] Tap reinstalled — input now \(target.inputNode.outputFormat(forBus: 0).sampleRate) Hz")
         } catch {
-            print("[AudioCapture] Failed to reinstall tap: \(error)")
+            ovLog("[AudioCapture] Failed to reinstall tap: \(error)")
         }
     }
 
@@ -227,7 +227,7 @@ final class AudioCaptureService: ObservableObject {
         let inputNode = engine.inputNode
         let nativeFormat = inputNode.outputFormat(forBus: 0)
         guard nativeFormat.sampleRate > 0 else { throw AudioCaptureError.inputNodeUnavailable }
-        print("[AudioCapture] Native input format: \(nativeFormat)")
+        ovLog("[AudioCapture] Native input format: \(nativeFormat)")
 
         let chunker = self.chunker ?? AudioCaptureChunker(targetSampleRate: targetSampleRate, frameMs: chunkDurationMs)
         guard let chunker else { throw AudioCaptureError.engineCreationFailed }
@@ -262,7 +262,7 @@ final class AudioCaptureService: ObservableObject {
                 let silence = Date().timeIntervalSince(self.lastFrameAt)
                 guard silence > self.stallTimeout else { return }
                 self.stallRecoveries += 1
-                print("[AudioCapture] ⚠︎ mic stalled \(String(format: "%.1f", silence))s — reinstalling tap (recovery #\(self.stallRecoveries))")
+                ovLog("[AudioCapture] ⚠︎ mic stalled \(String(format: "%.1f", silence))s — reinstalling tap (recovery #\(self.stallRecoveries))")
                 self.lastFrameAt = Date()   // give the reinstall a full window before retrying
                 self.reconfigure(engine: self.engine)
             }

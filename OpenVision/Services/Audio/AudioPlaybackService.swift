@@ -70,6 +70,10 @@ final class PlaybackRingBuffer {
     private(set) var overflowFrames = 0
     /// Frames the render block asked for while the ring was empty (jitter/starvation diagnostics).
     private(set) var starvedFrames = 0
+    /// Every frame ever handed to the speaker. The playback watchdog asserts this ADVANCES while
+    /// audio is buffered and the ring is not paused — a graph that looks healthy but renders
+    /// nothing is exactly how "I see the text but hear nothing" happens.
+    private(set) var totalRendered: Int = 0
 
     init(capacityFrames: Int, maxSegments: Int = 256, maxCompletions: Int = 64) {
         self.capacity = max(1024, capacityFrames)
@@ -172,6 +176,7 @@ final class PlaybackRingBuffer {
         }
         readIndex = (readIndex + available) % capacity
         count -= available
+        totalRendered += available
 
         // Attribute the rendered frames to the segments at the head, in order.
         var remaining = Int32(available)
@@ -270,7 +275,8 @@ protocol RealtimePlaybackSink: AnyObject {
     /// No more audio for this item; it completes when the ring plays it out.
     func closeItem(_ itemId: String)
     /// Stop feeding the speaker immediately, KEEP the buffer (server may say "false alarm").
-    func pausePlayback()
+    /// Returns true only if there was actually something in the ear to pause.
+    @discardableResult func pausePlayback() -> Bool
     /// Continue after a paused onset that did not confirm.
     func resumePlayback()
     /// Drop everything buffered. Returns (itemId, playedMs) of what was being heard.
@@ -318,6 +324,15 @@ final class AudioPlaybackService: ObservableObject, RealtimePlaybackSink {
     private let ringSeconds: Double = 30
 
     // MARK: - Item accounting
+
+    /// When the ring was paused by an onset (nil = not paused by us).
+    private var pausedAt: Date?
+    /// How long a pause may be held without a server verdict before we resume anyway.
+    private let pauseSafetySeconds: TimeInterval = 0.7
+    /// Render-advance assertion state.
+    private var lastRenderedSeen = 0
+    private var lastAdvanceAt = Date()
+    private var graphRebuilds = 0
 
     private var handles: [String: Int32] = [:]
     private var itemIds: [Int32: String] = [:]
@@ -407,8 +422,11 @@ final class AudioPlaybackService: ObservableObject, RealtimePlaybackSink {
             try engine.start()
         }
 
+        lastRenderedSeen = 0
+        lastAdvanceAt = Date()
+        pausedAt = nil
         startPolling()
-        print("[AudioPlayback] Ring-buffer player started (rate \(Int(rate)) Hz, shared engine: \(!ownsEngine))")
+        ovLog("[AudioPlayback] Ring-buffer player started (rate \(Int(rate)) Hz, shared engine: \(!ownsEngine))")
     }
 
     /// Teardown the player. The shared engine keeps running (capture may still use it).
@@ -442,7 +460,7 @@ final class AudioPlaybackService: ObservableObject, RealtimePlaybackSink {
         // first, so the player looked healthy while its source node was gone and she went mute).
         let detached = sourceNode?.engine == nil || mixerNode?.engine == nil
         guard detached || sharedEngine !== engine || !sharedEngine.isRunning else { return }
-        print("[AudioPlayback] Rebuilding the player graph (detached: \(detached), running: \(sharedEngine.isRunning))")
+        ovLog("[AudioPlayback] Rebuilding the player graph (detached: \(detached), running: \(sharedEngine.isRunning))")
         try? setup(engine: sharedEngine)
     }
 
@@ -476,12 +494,33 @@ final class AudioPlaybackService: ObservableObject, RealtimePlaybackSink {
         drainCompletions()
     }
 
-    func pausePlayback() {
-        ring?.pause()
+    /// Pause ONLY when a reply is actually playing. `input_audio_buffer.speech_started` fires on
+    /// every utterance onset, not just barge-ins (channel.ts `speechStarted`), and when nothing is
+    /// playing the server has no turn to false-alarm on — so no `aurelia.playback.resume` ever
+    /// follows. Pausing an idle ring therefore wedged it shut for the rest of the session and the
+    /// NEXT reply was enqueued into a paused player: transcripts fine, silence in the ear.
+    @discardableResult
+    func pausePlayback() -> Bool {
+        guard let ring, ring.bufferedFrames > 0 else { return false }
+        ring.pause()
+        pausedAt = Date()
+        return true
+    }
+
+    /// Safety net: the server promises a verdict within its confirm window (~400 ms). If neither
+    /// `output_audio_buffer.cleared` nor `aurelia.playback.resume` arrives, resume anyway rather
+    /// than staying mute forever.
+    private func releaseStalePause() {
+        guard let ring, ring.isPaused, let since = pausedAt else { return }
+        let held = Date().timeIntervalSince(since)
+        guard held > pauseSafetySeconds else { return }
+        ovLog("[AudioPlayback] ⚠︎ pause held \(String(format: "%.2f", held))s with no verdict — resuming (buffered \(Int(bufferedMs)) ms)")
+        resumePlayback()
     }
 
     func resumePlayback() {
         ring?.resume()
+        pausedAt = nil
         duck(false)
     }
 
@@ -489,6 +528,7 @@ final class AudioPlaybackService: ObservableObject, RealtimePlaybackSink {
     func flushPlayback() -> (itemId: String, playedMs: Double)? {
         guard let ring else { return nil }
         let head = ring.flush()
+        pausedAt = nil
         duck(false)
         isPlaying = false
         guard let head, let itemId = itemIds[head.handle] else { return nil }
@@ -533,8 +573,32 @@ final class AudioPlaybackService: ObservableObject, RealtimePlaybackSink {
         pollTimer?.invalidate()
         // 40 ms — one output frame; fast enough that `aurelia.playback.done` lands with the ear.
         pollTimer = Timer.scheduledTimer(withTimeInterval: 0.04, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.drainCompletions() }
+            Task { @MainActor in
+                self?.auditPlayback()
+                self?.drainCompletions()
+            }
         }
+    }
+
+    /// Runs on the 40 ms poll: release a stale pause, and prove the graph is actually rendering.
+    private func auditPlayback() {
+        releaseStalePause()
+        guard let ring else { return }
+        let rendered = ring.totalRendered
+        if rendered != lastRenderedSeen {
+            lastRenderedSeen = rendered
+            lastAdvanceAt = Date()
+            return
+        }
+        // Nothing rendered since the last poll. That is only a fault when audio is waiting and
+        // the ring is not deliberately paused.
+        guard ring.bufferedFrames > 0, !ring.isPaused else { lastAdvanceAt = Date(); return }
+        guard Date().timeIntervalSince(lastAdvanceAt) > 0.5 else { return }
+        let live = engine
+        graphRebuilds += 1
+        ovLog("[AudioPlayback] ⚠︎ \(Int(bufferedMs)) ms buffered but nothing rendered for 500 ms — rebuilding the graph (rebuild #\(graphRebuilds), engine running: \(live?.isRunning ?? false), source attached: \(sourceNode?.engine != nil))")
+        lastAdvanceAt = Date()
+        try? setup(engine: live)
     }
 
     private func drainCompletions() {

@@ -71,6 +71,7 @@
 		AF2C901CA288086B7EBA6083 /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7376B3EE1F53DF1BD56B1095 /* Constants.swift */; };
 		B72ACD1B63980B9C4BBC7B8E /* MWDATCamera in Frameworks */ = {isa = PBXBuildFile; productRef = 0DEB724AE3EDB04ABE9E3768 /* MWDATCamera */; };
 		B82C3BB7AED7C2367F729678 /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = 6ADFD2818BFD4713F6BDA7F7 /* MLXLMCommon */; };
+		B92EFADC07A10C9949406954 /* OVLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC1FBEF7F3C8C552206B567A /* OVLog.swift */; };
 		BE99A2B1118292BBC7E1FC59 /* GlassesManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DD25C635E9A37E7D6CA7677 /* GlassesManager.swift */; };
 		BFC445B65C5C0BE610EC719E /* GeminiVisionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2612B6630DAE1360F7FBFEE5 /* GeminiVisionService.swift */; };
 		BFD9D5E86289F987AC6931B8 /* TranscriptBubble.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E256E8AF9CAB4123C91B979 /* TranscriptBubble.swift */; };
@@ -165,6 +166,7 @@
 		A1E4A28F9C0979733D4ABDB2 /* SwirlOrb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwirlOrb.swift; sourceTree = "<group>"; };
 		A7B97C063C947F53F6E209D1 /* AppleFoundationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleFoundationService.swift; sourceTree = "<group>"; };
 		A900F00D2451513A29BC4C6F /* AIBackendProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIBackendProtocol.swift; sourceTree = "<group>"; };
+		AC1FBEF7F3C8C552206B567A /* OVLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OVLog.swift; sourceTree = "<group>"; };
 		ACA3BB4BDC73148785327C9A /* OpenVisionTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = OpenVisionTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		ADC230E2AE44E5132DC5AB01 /* SettingsManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsManager.swift; sourceTree = "<group>"; };
 		ADCFF581A7AE50FBF35EA257 /* GeminiLiveService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeminiLiveService.swift; sourceTree = "<group>"; };
@@ -287,6 +289,7 @@
 			children = (
 				60E2210A5A20177647BDB5AD /* Config.swift */,
 				7376B3EE1F53DF1BD56B1095 /* Constants.swift */,
+				AC1FBEF7F3C8C552206B567A /* OVLog.swift */,
 			);
 			path = Config;
 			sourceTree = "<group>";
@@ -798,6 +801,7 @@
 				785BA1918981FE85679CC48E /* NativeToolSupport.swift in Sources */,
 				4DFF630E56769253493B4B57 /* NotificationForegroundPresenter.swift in Sources */,
 				37787EEECF8236DABFDE4D3D /* OVExceptionCatcher.m in Sources */,
+				B92EFADC07A10C9949406954 /* OVLog.swift in Sources */,
 				2947D6E5D6D5B7080C53D478 /* OnboardingView.swift in Sources */,
 				A17626C4B92966423AF06452 /* OpenAIRealtimeService.swift in Sources */,
 				223474C328BCC3C81ADCB93D /* OpenAIService.swift in Sources */,
