@@ -559,10 +559,19 @@ final class VoiceAgentViewModel: ObservableObject {
                 self.agentState = .listening
             }
 
-            // Auto-start session if not already active (use Task to avoid blocking)
+            // AUR-742a: the wake word is the DOOR TO THE CONVERSATION, not to push-to-ask.
+            // «Аурелия» now opens the same audio-only realtime session the orb tap opens (camera
+            // off, no «включи видео» needed). Push-to-ask survives only behind the long-press and
+            // its own button, and as the fallback when no realtime backend is configured.
+            // Known gap, deliberate: speech in the SAME breath as the wake word is dropped —
+            // the session needs ~1 s to come up. The 2 s pre-roll that fixes it is AUR-743.
             Task { @MainActor in
-                if !self.isSessionActive && self.settingsManager.settings.isCurrentBackendConfigured {
-                    ovLog("[VoiceAgent] Starting session from wake word...")
+                if self.isLiveVideoMode || self.isSessionActive { return }
+                if self.canStartTalkMode {
+                    ovLog("[VoiceAgent] Wake word → opening the realtime conversation (audio-only)")
+                    await self.startLiveVideoMode()
+                } else if self.settingsManager.settings.isCurrentBackendConfigured {
+                    ovLog("[VoiceAgent] Wake word → push-to-ask (no realtime backend configured)")
                     self.startSession()
                 }
             }
