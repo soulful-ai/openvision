@@ -385,7 +385,11 @@ final class AudioPlaybackService: ObservableObject, RealtimePlaybackSink {
         engine.attach(source)
         engine.attach(mixer)
         engine.connect(source, to: mixer, format: format)
-        engine.connect(mixer, to: engine.mainMixerNode, format: nil)
+        // Downstream runs at the hardware rate; the mixer does the SRC so the ring can stay in
+        // the server's 24 kHz frames (which is what played-ms is counted in). A nil/invalid
+        // hardware format (engine not yet realized) falls back to the source format.
+        let downstream = engine.mainMixerNode.outputFormat(forBus: 0)
+        engine.connect(mixer, to: engine.mainMixerNode, format: downstream.sampleRate > 0 ? downstream : format)
 
         // Forward what we play to the session recorder (cheap no-op when not recording): the
         // assistant's voice is mixed into demo recordings digitally, since the mic path buries
@@ -547,8 +551,8 @@ final class AudioPlaybackService: ObservableObject, RealtimePlaybackSink {
 
     // MARK: - Conversion
 
-    /// Convert Int16 PCM data to Float32 samples.
-    static func floatSamples(fromPCM16 data: Data) -> [Float] {
+    /// Convert Int16 PCM data to Float32 samples. Pure — callable off the main actor (tests).
+    nonisolated static func floatSamples(fromPCM16 data: Data) -> [Float] {
         let sampleCount = data.count / 2
         guard sampleCount > 0 else { return [] }
         var samples = [Float](repeating: 0, count: sampleCount)
