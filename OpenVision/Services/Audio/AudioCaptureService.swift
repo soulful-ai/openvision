@@ -135,6 +135,16 @@ final class AudioCaptureService: ObservableObject {
     private var tappedNode: AVAudioInputNode?
     private var chunker: AudioCaptureChunker?
 
+    /// When the last mic frame reached the main actor. The realtime session is deaf the moment
+    /// this stops advancing, and it stops silently: iOS can kill a running tap on a route or
+    /// engine-configuration change (starting the phone camera is one such trigger) without
+    /// throwing anything at us.
+    private(set) var lastFrameAt: Date = .distantPast
+    private var stallWatchdog: Timer?
+    /// Seconds of no frames before the tap is reinstalled.
+    private let stallTimeout: TimeInterval = 3.0
+    private var stallRecoveries = 0
+
     // MARK: - Audio Format
 
     /// Target sample rate for output.
@@ -167,6 +177,8 @@ final class AudioCaptureService: ObservableObject {
             try engine.start()
         }
         isCapturing = true
+        lastFrameAt = Date()
+        startStallWatchdog()
         print("[AudioCapture] Started (frame \(chunkDurationMs) ms → \(Int(targetSampleRate)) Hz PCM16, shared engine: \(!ownsEngine))")
     }
 
@@ -174,6 +186,8 @@ final class AudioCaptureService: ObservableObject {
     func stopCapture() {
         guard isCapturing else { return }
 
+        stallWatchdog?.invalidate()
+        stallWatchdog = nil
         tappedNode?.removeTap(onBus: 0)
         tappedNode = nil
         if ownsEngine { engine?.stop() }
@@ -200,6 +214,7 @@ final class AudioCaptureService: ObservableObject {
                 target.prepare()
                 try target.start()
             }
+            lastFrameAt = Date()
             print("[AudioCapture] Tap reinstalled — input now \(target.inputNode.outputFormat(forBus: 0).sampleRate) Hz")
         } catch {
             print("[AudioCapture] Failed to reinstall tap: \(error)")
@@ -217,7 +232,11 @@ final class AudioCaptureService: ObservableObject {
         let chunker = self.chunker ?? AudioCaptureChunker(targetSampleRate: targetSampleRate, frameMs: chunkDurationMs)
         guard let chunker else { throw AudioCaptureError.engineCreationFailed }
         chunker.onFrame = { [weak self] frame in
-            Task { @MainActor in self?.onAudioCaptured?(frame) }
+            Task { @MainActor in
+                guard let self else { return }
+                self.lastFrameAt = Date()
+                self.onAudioCaptured?(frame)
+            }
         }
         chunker.onLevel = { [weak self] level in
             Task { @MainActor in self?.audioLevel = level }
@@ -230,6 +249,24 @@ final class AudioCaptureService: ObservableObject {
             chunker.process(buffer)
         }
         tappedNode = inputNode
+    }
+
+    /// A live session that stops hearing the wearer is the worst failure this app has (she
+    /// answers once, then never again). Nothing throws when it happens, so poll: no frames for
+    /// `stallTimeout` while capturing → reinstall the tap and restart the engine.
+    private func startStallWatchdog() {
+        stallWatchdog?.invalidate()
+        stallWatchdog = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.isCapturing else { return }
+                let silence = Date().timeIntervalSince(self.lastFrameAt)
+                guard silence > self.stallTimeout else { return }
+                self.stallRecoveries += 1
+                print("[AudioCapture] ⚠︎ mic stalled \(String(format: "%.1f", silence))s — reinstalling tap (recovery #\(self.stallRecoveries))")
+                self.lastFrameAt = Date()   // give the reinstall a full window before retrying
+                self.reconfigure(engine: self.engine)
+            }
+        }
     }
 
     /// Rebuild the chunker for a new target rate / frame size. Call before `startCapture`.

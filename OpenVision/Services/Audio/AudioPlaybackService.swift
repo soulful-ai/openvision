@@ -436,8 +436,13 @@ final class AudioPlaybackService: ObservableObject, RealtimePlaybackSink {
 
     /// Re-attach after a route/configuration change tore the graph down (AUR-723 route observers).
     func reattachIfNeeded(engine sharedEngine: AVAudioEngine?) {
-        guard sourceNode != nil else { return }
-        guard let sharedEngine, sharedEngine !== engine || !sharedEngine.isRunning else { return }
+        guard let sharedEngine, sourceNode != nil else { return }
+        // `AVAudioNode.engine` goes nil when a configuration change detaches the node — checking
+        // only `isRunning` missed exactly that case (capture's own recovery restarts the engine
+        // first, so the player looked healthy while its source node was gone and she went mute).
+        let detached = sourceNode?.engine == nil || mixerNode?.engine == nil
+        guard detached || sharedEngine !== engine || !sharedEngine.isRunning else { return }
+        print("[AudioPlayback] Rebuilding the player graph (detached: \(detached), running: \(sharedEngine.isRunning))")
         try? setup(engine: sharedEngine)
     }
 

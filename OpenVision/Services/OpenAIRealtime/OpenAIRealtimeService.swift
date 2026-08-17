@@ -111,6 +111,12 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
     private(set) var sessionId: String?
     /// True while `disconnect()` was called by us: no reconnect, fire `onDisconnected`.
     private var intentionalClose = false
+    /// Bumped on every teardown. A receive loop only acts while its generation is current, so a
+    /// dying socket can never tear down its replacement or feed playback/turns (AUR-723c).
+    private var socketGeneration = 0
+    /// Exactly one open attempt at a time — concurrent `connect()`/reconnect would leave two
+    /// live sockets for one app instance (server side: `live:2` for the same user).
+    private var isOpening = false
     private var reconnectTask: Task<Void, Never>?
     private var reconnectAttempt = 0
     private var pingTask: Task<Void, Never>?
@@ -145,7 +151,7 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
 
     func connect() async throws {
         guard !apiKey.isEmpty else { throw AIBackendError.notConfigured }
-        guard !connectionState.isUsable, !connectionState.isAttempting else { return }
+        guard !connectionState.isUsable, !connectionState.isAttempting, !isOpening else { return }
         intentionalClose = false
         try await openSocket(resuming: false)
         reconnectAttempt = 0
@@ -153,6 +159,18 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
 
     /// Open the socket and wait for `session.created` + our `session.update` to be accepted.
     private func openSocket(resuming: Bool) async throws {
+        guard !isOpening else { return }
+        isOpening = true
+        defer { isOpening = false }
+
+        // ONE socket, always: whatever was open (and its receive loop, ping task and URLSession)
+        // dies BEFORE the replacement is created. Skipping this is how a resume left the old
+        // socket alive — the stale loop then reported ITS death as the live socket's death,
+        // tore down the new one and scheduled another reconnect, while the server still counted
+        // the abandoned session as live.
+        closeWebSocket()
+        let generation = socketGeneration
+
         connectionState = resuming ? .reconnecting(attempt: reconnectAttempt) : .connecting
         onConnectionStateChanged?(connectionState)
 
@@ -171,7 +189,7 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
             webSocket = urlSession?.webSocketTask(with: request)
             webSocket?.resume()
 
-            startReceiving()
+            startReceiving(generation: generation)
 
             // Wait for the socket to come up.
             var running = false
@@ -193,7 +211,7 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
             onConnectionStateChanged?(connectionState)
             startPinging()
             flushOfflineAudio()
-            print("[OpenAIRealtime] Connected (session \(sessionId ?? "?"), resumed: \(resuming), route \(routeTag))")
+            print("[OpenAIRealtime] Connected socket #\(generation) (session \(sessionId ?? "?"), resumed: \(resuming), route \(routeTag))")
 
         } catch {
             lastError = error.localizedDescription
@@ -241,6 +259,8 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
     }
 
     private func closeWebSocket() {
+        // Invalidate every in-flight receive loop for the socket being dropped.
+        socketGeneration &+= 1
         receiveTask?.cancel()
         receiveTask = nil
         pingTask?.cancel()
@@ -414,19 +434,25 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
 
     // MARK: - Receive Loop
 
-    private func startReceiving() {
+    private func startReceiving(generation: Int) {
         let socket = webSocket
         receiveTask = Task { [weak self] in
             while !Task.isCancelled {
-                guard let self, let socket, socket === self.webSocket else { break }
+                guard let self, let socket,
+                      self.socketGeneration == generation, socket === self.webSocket else { break }
                 do {
                     let message = try await socket.receive()
+                    // A message that arrived on a socket we have already replaced must not reach
+                    // playback or start a turn.
+                    guard self.socketGeneration == generation else { break }
                     await self.handleMessage(message)
                 } catch {
-                    if !Task.isCancelled {
-                        print("[OpenAIRealtime] Receive error: \(error)")
-                        await self.handleDisconnect(error: error)
-                    }
+                    // Only the CURRENT socket's death is a disconnect. Without this guard a
+                    // superseded socket's error tore down its replacement and scheduled another
+                    // reconnect — a self-sustaining leak of live sessions.
+                    guard !Task.isCancelled, self.socketGeneration == generation else { break }
+                    print("[OpenAIRealtime] Receive error on socket #\(generation): \(error)")
+                    await self.handleDisconnect(error: error)
                     break
                 }
             }
@@ -658,8 +684,8 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
     private func attemptReconnect() async {
         reconnectTask = nil
         guard !intentionalClose else { return }
-        // The old socket is gone; the session id is what carries the conversation across the swap.
-        if let socket = webSocket { socket.cancel(with: .abnormalClosure, reason: nil); webSocket = nil }
+        // `openSocket` closes whatever is still open first; the session id is what carries the
+        // conversation across the swap.
         do {
             try await openSocket(resuming: true)
             reconnectAttempt = 0
