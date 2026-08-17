@@ -74,6 +74,34 @@ enum Constants {
         static let defaultVideoFPS = 1
     }
 
+    // MARK: - Realtime full-duplex audio (AUR-723)
+
+    /// Client-side tuning for the continuous full-duplex conversation over `/v1/realtime`.
+    /// The brain owns turn-taking; the phone is an audio I/O device with an instant flush.
+    enum RealtimeAudio {
+        /// Mic frame duration sent as `input_audio_buffer.append` (plan §3: 100 → 40 ms).
+        static let captureFrameMs = 40
+
+        /// Protocol tag advertised in `session.update.metadata` so the brain can drop the legacy
+        /// play-out hold for this client (`response.done` right after the last delta).
+        static let protocolTag = "aurelia.v2"
+
+        /// Client name reported in `session.update.metadata`.
+        static let clientTag = "openvision"
+
+        /// Reconnect backoff after an unexpected socket close (seconds).
+        static let reconnectInitialDelay: TimeInterval = 0.25
+        static let reconnectMaxDelay: TimeInterval = 4.0
+        static let reconnectMaxAttempts = 8
+
+        /// Keepalive ping while a session is live (Cloudflare idles a quiet socket).
+        static let pingInterval: TimeInterval = 20.0
+
+        /// Mic audio kept locally while the socket is down, so speech during a pod swap is not
+        /// lost — replayed on the resumed session (plan §2.2 "5 s local ring").
+        static let offlineRingSeconds: Double = 5.0
+    }
+
     // MARK: - Voice
 
     enum Voice {
