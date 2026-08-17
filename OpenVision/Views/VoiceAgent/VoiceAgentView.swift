@@ -300,6 +300,23 @@ struct VoiceAgentView: View {
                 .disabled(!viewModel.canStartTalkMode)
                 .opacity(viewModel.canStartTalkMode ? 1 : 0.4)
 
+                if viewModel.isLiveVideoMode {
+                    // AUR-742a: the eye is opt-in inside the conversation.
+                    Button {
+                        viewModel.toggleLiveCamera()
+                    } label: {
+                        Image(systemName: viewModel.liveCameraSource == .none ? "video.slash.fill" : "video.fill")
+                            .font(.title3)
+                            .foregroundColor(.white)
+                            .padding(12)
+                            .background(
+                                Circle().fill(viewModel.liveCameraSource == .none
+                                              ? Color.white.opacity(0.15) : Theme.accent.opacity(0.9))
+                            )
+                    }
+                    .accessibilityLabel(viewModel.liveCameraSource == .none ? "Turn the camera on" : "Turn the camera off")
+                }
+
                 if !viewModel.isLiveVideoMode {
                     Button {
                         viewModel.toggleSession()

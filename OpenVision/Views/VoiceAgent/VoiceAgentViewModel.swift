@@ -53,7 +53,7 @@ final class VoiceAgentViewModel: ObservableObject {
 
         var label: String {
             switch self {
-            case .none: return "No camera"
+            case .none: return "Camera off"
             case .glasses: return "Glasses"
             case .phone: return "Phone camera"
             }
@@ -67,6 +67,12 @@ final class VoiceAgentViewModel: ObservableObject {
         }
     }
     @Published var liveCameraSource: LiveCameraSource = .none
+
+    /// AUR-742a: the PHONE camera is opt-in. Tapping into the conversation is AUDIO-ONLY — the
+    /// eye opens only on explicit intent («включи камеру» / the toggle in the live UI). Glasses
+    /// are different: when they are streaming they feed the session automatically, which is the
+    /// entire point of wearing them.
+    @Published private(set) var phoneCameraRequested = false
     /// True when voice recognition is ready (audio engine running)
     @Published var isVoiceReady = false
     /// True while a POV demo recording (glasses video + mic audio) is in progress.
@@ -1058,6 +1064,8 @@ final class VoiceAgentViewModel: ObservableObject {
         // nothing and the session sent zero frames (measured on the phone rig 2026-08-17 —
         // `/admin/rt-sessions` showed the live ru-RU session answering with 0 `vision:` lines).
         phoneCameraDeniedAnnounced = false
+        // AUDIO-ONLY entry (principal ruling 2026-08-17): the phone eye stays shut until asked for.
+        phoneCameraRequested = false
         await updateLiveCameraSource()
         watchCameraSource()
 
@@ -1177,6 +1185,7 @@ final class VoiceAgentViewModel: ObservableObject {
         // Stop the phone camera + its watchers (AUR-723b)
         cameraSourceWatch.removeAll()
         phoneCamera.stop()
+        phoneCameraRequested = false
         liveCameraSource = .none
 
         // Stop audio playback + release the shared engine (AUR-723)
@@ -1265,6 +1274,16 @@ final class VoiceAgentViewModel: ObservableObject {
             return
         }
 
+        // No explicit request → no phone eye. A session that opened audio-only stays audio-only.
+        guard phoneCameraRequested else {
+            if phoneCamera.isRunning { phoneCamera.stop() }
+            if liveCameraSource != .none {
+                liveCameraSource = .none
+                ovLog("[VoiceAgent] Live eye: off (audio-only)")
+            }
+            return
+        }
+
         if phoneCamera.isRunning {
             liveCameraSource = .phone
             return
@@ -1299,6 +1318,33 @@ final class VoiceAgentViewModel: ObservableObject {
         ovLog("[VoiceAgent] Phone camera unavailable: \(message)")
     }
 
+    /// Explicit camera intent — the live UI's toggle and the in-session voice commands.
+    func setLiveCamera(_ on: Bool) {
+        guard isLiveVideoMode else { return }
+        guard phoneCameraRequested != on else { return }
+        phoneCameraRequested = on
+        ovLog("[VoiceAgent] Camera \(on ? "requested" : "dismissed") by the wearer")
+        Task { @MainActor in await updateLiveCameraSource() }
+    }
+
+    func toggleLiveCamera() { setLiveCamera(!phoneCameraRequested) }
+
+    /// Inside a session «включи камеру/видео» and «выключи камеру/видео» toggle the EYE, they no
+    /// longer switch modes — the conversation itself is entered by tap or wake word (AUR-742a).
+    /// Returns true when the utterance was a camera command (so it is not treated as a question).
+    @discardableResult
+    private func handleCameraCommand(_ text: String) -> Bool {
+        let t = text.lowercased()
+        let off = ["выключи камеру", "выключи видео", "останови камеру", "останови видео",
+                   "стоп камера", "стоп камеру", "стоп видео", "убери камеру",
+                   "camera off", "turn off camera", "stop camera", "stop video", "stop the camera"]
+        let on = ["включи камеру", "включи видео", "покажи камеру", "открой камеру",
+                  "camera on", "turn on camera", "start camera", "start video", "show camera"]
+        if off.contains(where: { t.contains($0) }) { setLiveCamera(false); return true }
+        if on.contains(where: { t.contains($0) }) { setLiveCamera(true); return true }
+        return false
+    }
+
     /// Follow glasses registration/streaming while live so the eye switches without a restart.
     private func watchCameraSource() {
         cameraSourceWatch.removeAll()
@@ -1330,6 +1376,9 @@ final class VoiceAgentViewModel: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.userTranscript = text
+
+                // AUR-742a: inside a live session these phrases toggle the CAMERA, not the mode.
+                if self.isLiveVideoMode, self.handleCameraCommand(text) { return }
 
                 // Check for stop video commands in what the user said
                 let lowerText = text.lowercased()
