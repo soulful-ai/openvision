@@ -77,6 +77,7 @@
 		BFD9D5E86289F987AC6931B8 /* TranscriptBubble.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E256E8AF9CAB4123C91B979 /* TranscriptBubble.swift */; };
 		C328DABCDFDF6531B38D4834 /* TTSService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D416290774C17FDC0DDFBC68 /* TTSService.swift */; };
 		C3B4CF9D8B6EC21957CC7BEF /* OpenClawProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7946C8232CEA5A362056AC2A /* OpenClawProtocol.swift */; };
+		C73C6168161C8A3DCED11B8E /* LiveEyePlanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4BDA8F2F09F48BF3A3949BD /* LiveEyePlanTests.swift */; };
 		CB6636C853387785316153FD /* ReminderTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = 356A075E2D281F1FF15A67C3 /* ReminderTool.swift */; };
 		CBC50863A0C82CB068A92984 /* SpeechLocale.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFA6022E2E7A8731D8E494C1 /* SpeechLocale.swift */; };
 		CDA89E5AAAF25713C6321971 /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 266032AAD0DF8037A64CAB15 /* MainTabView.swift */; };
@@ -89,6 +90,7 @@
 		DCA893B0F4EB539CA4C1EC00 /* AppleNativeTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDBE980F673E3077B58977E5 /* AppleNativeTools.swift */; };
 		E002D977473CAE9959691682 /* Conversation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6188DD26571BACB30096654D /* Conversation.swift */; };
 		E7CDE1FBC061C2DF4BDDD84E /* wake_activation.mp3 in Resources */ = {isa = PBXBuildFile; fileRef = 1DD518E30804BD392EEA0B34 /* wake_activation.mp3 */; };
+		E8CAB8535CF9D8E5A678E563 /* LiveEyePlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26B434A9C596391A988D1E72 /* LiveEyePlan.swift */; };
 		E93E2788532682366707A34D /* GlassesSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED25EC5E800C216965A50F8A /* GlassesSettingsView.swift */; };
 		E9628B20FB4654FBBFC61EF9 /* DocumentChunkingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39552315579536D518404FED /* DocumentChunkingTests.swift */; };
 		EF5319DFC76B8BD9A50EF195 /* OpenVisionApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3FFDFCB5AA5A664CC70E183 /* OpenVisionApp.swift */; };
@@ -124,6 +126,7 @@
 		257CFA920D044908381B85FE /* RealtimePlaybackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealtimePlaybackTests.swift; sourceTree = "<group>"; };
 		2612B6630DAE1360F7FBFEE5 /* GeminiVisionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeminiVisionService.swift; sourceTree = "<group>"; };
 		266032AAD0DF8037A64CAB15 /* MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainTabView.swift; sourceTree = "<group>"; };
+		26B434A9C596391A988D1E72 /* LiveEyePlan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveEyePlan.swift; sourceTree = "<group>"; };
 		2C34D9959966F79B36E01B21 /* DocumentSearchTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentSearchTool.swift; sourceTree = "<group>"; };
 		2E89F8710F8A609C73C717C0 /* ConversationListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationListView.swift; sourceTree = "<group>"; };
 		356A075E2D281F1FF15A67C3 /* ReminderTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReminderTool.swift; sourceTree = "<group>"; };
@@ -164,6 +167,7 @@
 		9BCCC84E6880175BD83F37FD /* ConversationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationManager.swift; sourceTree = "<group>"; };
 		9BDBCEE6B3B8DF551525A4DA /* AppleIntelligenceSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleIntelligenceSettingsView.swift; sourceTree = "<group>"; };
 		A1E4A28F9C0979733D4ABDB2 /* SwirlOrb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwirlOrb.swift; sourceTree = "<group>"; };
+		A4BDA8F2F09F48BF3A3949BD /* LiveEyePlanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveEyePlanTests.swift; sourceTree = "<group>"; };
 		A7B97C063C947F53F6E209D1 /* AppleFoundationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleFoundationService.swift; sourceTree = "<group>"; };
 		A900F00D2451513A29BC4C6F /* AIBackendProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIBackendProtocol.swift; sourceTree = "<group>"; };
 		AC1FBEF7F3C8C552206B567A /* OVLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OVLog.swift; sourceTree = "<group>"; };
@@ -385,6 +389,7 @@
 		738FAA097CCCDFD54C60C673 /* VoiceAgent */ = {
 			isa = PBXGroup;
 			children = (
+				26B434A9C596391A988D1E72 /* LiveEyePlan.swift */,
 				601D21AA8114E457F40C6C4A /* VoiceAgentView.swift */,
 				BEEDCA2C462B77066AA0CD25 /* VoiceAgentViewModel.swift */,
 			);
@@ -577,6 +582,7 @@
 			isa = PBXGroup;
 			children = (
 				39552315579536D518404FED /* DocumentChunkingTests.swift */,
+				A4BDA8F2F09F48BF3A3949BD /* LiveEyePlanTests.swift */,
 				DD3DFE96152AAE9145F104D6 /* LocalAgentRouteTests.swift */,
 				BE4D7E31C137C29246EB9281 /* NativeToolSupportTests.swift */,
 				257CFA920D044908381B85FE /* RealtimePlaybackTests.swift */,
@@ -744,6 +750,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				E9628B20FB4654FBBFC61EF9 /* DocumentChunkingTests.swift in Sources */,
+				C73C6168161C8A3DCED11B8E /* LiveEyePlanTests.swift in Sources */,
 				DC6776A7CBFBB8E151FB6B85 /* LocalAgentRouteTests.swift in Sources */,
 				5F19226406CF5B705B57BACF /* NativeToolSupportTests.swift in Sources */,
 				3861B459D0E170DEFEB6BA09 /* RealtimePlaybackTests.swift in Sources */,
@@ -794,6 +801,7 @@
 				29F56C03229677BC1F157CEC /* HapticFeedback.swift in Sources */,
 				8351C940EEB51503B73F3449 /* KokoroSettingsView.swift in Sources */,
 				FCA8B46A222A0C469FF7873B /* KokoroTTSService.swift in Sources */,
+				E8CAB8535CF9D8E5A678E563 /* LiveEyePlan.swift in Sources */,
 				53C17BBA774E7D3D4E295584 /* LocalAgent.swift in Sources */,
 				CDA89E5AAAF25713C6321971 /* MainTabView.swift in Sources */,
 				341497F0AA31AE9C6E137386 /* MemoriesView.swift in Sources */,

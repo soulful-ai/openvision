@@ -301,7 +301,8 @@ struct VoiceAgentView: View {
                 .opacity(viewModel.canStartTalkMode ? 1 : 0.4)
 
                 if viewModel.isLiveVideoMode {
-                    // AUR-742a: the eye is opt-in inside the conversation.
+                    // AUR-742a/AUR-757: the eye is opt-in inside the conversation — BOTH eyes.
+                    // The toggle opens the glasses camera when they are there, the phone otherwise.
                     Button {
                         viewModel.toggleLiveCamera()
                     } label: {
@@ -314,7 +315,9 @@ struct VoiceAgentView: View {
                                               ? Color.white.opacity(0.15) : Theme.accent.opacity(0.9))
                             )
                     }
-                    .accessibilityLabel(viewModel.liveCameraSource == .none ? "Turn the camera on" : "Turn the camera off")
+                    .accessibilityLabel(viewModel.liveCameraSource == .none
+                                        ? (viewModel.glassesEyeAvailable ? "Turn the glasses camera on" : "Turn the camera on")
+                                        : "Turn the camera off")
                 }
 
                 if !viewModel.isLiveVideoMode {

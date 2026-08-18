@@ -68,11 +68,18 @@ final class VoiceAgentViewModel: ObservableObject {
     }
     @Published var liveCameraSource: LiveCameraSource = .none
 
-    /// AUR-742a: the PHONE camera is opt-in. Tapping into the conversation is AUDIO-ONLY — the
-    /// eye opens only on explicit intent («включи камеру» / the toggle in the live UI). Glasses
-    /// are different: when they are streaming they feed the session automatically, which is the
-    /// entire point of wearing them.
-    @Published private(set) var phoneCameraRequested = false
+    /// The eye is opt-in, whichever eye it is. Tapping into the conversation (or waking her) is
+    /// AUDIO-ONLY — the eye opens only on explicit intent inside the session («включи камеру» /
+    /// "camera on" / the toggle in the live UI) and shuts on the off-commands or the toggle.
+    /// AUR-742a (2026-08-17) made the PHONE camera opt-in but let registered glasses feed the
+    /// session automatically "because that is the point of wearing them". AUR-757 (principal
+    /// ruling 2026-08-18, first live session on the Ray-Ban Meta Headliner Gen 2 with DAT
+    /// registered: "when I call her, she should just use audio; only when I specifically say so
+    /// on the live call already, she can start recording") reversed that: the GLASSES camera is
+    /// opt-in exactly like the phone camera. When the eye is asked for it is glasses-first
+    /// (registered + connected → `startStreaming()`, LED on), phone camera otherwise; dismissing
+    /// it stops the glasses stream (LED off) and/or the phone camera.
+    @Published private(set) var cameraRequested = false
     /// True when voice recognition is ready (audio engine running)
     @Published var isVoiceReady = false
     /// True while a POV demo recording (glasses video + mic audio) is in progress.
@@ -985,10 +992,12 @@ final class VoiceAgentViewModel: ObservableObject {
         openAIRealtime.aecActive = AudioSessionManager.shared.clientAECActive
         ovLog("[VoiceAgent] Live audio rig: \(liveRoute), client AEC: \(openAIRealtime.aecActive)")
 
-        // Start glasses streaming (only when they're actually there — audio-only rigs skip it).
-        if glassesManager.isRegistered, !glassesManager.isStreaming {
-            await glassesManager.startStreaming()
-        }
+        // AUR-757: the conversation starts AUDIO-ONLY even with DAT glasses registered and
+        // connected — the glasses camera is NOT started here any more (it used to be, "only when
+        // they're actually there"). The eye opens later, on explicit intent, via
+        // `setLiveCamera(true)` → `updateLiveCameraSource()`, glasses-first. A stream that is
+        // already running for some other reason is left alone here (a POV recording owns it);
+        // frames only reach the backend once the eye is asked for (see `onVideoFrame` below).
 
         // Connect to the live backend
         do {
@@ -1057,8 +1066,11 @@ final class VoiceAgentViewModel: ObservableObject {
             return
         }
 
-        // Setup video frame routing to the live backend
-        glassesManager.onVideoFrame = { [weak service] image in
+        // Setup video frame routing to the live backend. AUR-757: gated on `cameraRequested`, so
+        // a glasses stream that runs for another reason (a POV recording) never feeds the brain
+        // while she is supposed to be audio-only.
+        glassesManager.onVideoFrame = { [weak self, weak service] image in
+            guard let self, self.cameraRequested else { return }
             if let jpegData = image.jpegData(compressionQuality: 0.6) {
                 service?.sendVideoFrame(imageData: jpegData)
             }
@@ -1067,14 +1079,15 @@ final class VoiceAgentViewModel: ObservableObject {
         isLiveVideoMode = true
         agentState = .liveVideo
 
-        // AUR-723b: glasses first, phone camera otherwise — and keep following that as the
-        // glasses come and go mid-session. MUST run AFTER `isLiveVideoMode = true`:
-        // `updateLiveCameraSource` guards on it, so starting the eye any earlier silently did
-        // nothing and the session sent zero frames (measured on the phone rig 2026-08-17 —
-        // `/admin/rt-sessions` showed the live ru-RU session answering with 0 `vision:` lines).
+        // AUR-723b/AUR-757: glasses first, phone camera otherwise — and keep following that as
+        // the glasses come and go mid-session. MUST run AFTER `isLiveVideoMode = true`:
+        // `updateLiveCameraSource` guards on it, so touching the eye any earlier silently did
+        // nothing (measured on the phone rig 2026-08-17 — `/admin/rt-sessions` showed the live
+        // ru-RU session answering with 0 `vision:` lines).
         phoneCameraDeniedAnnounced = false
-        // AUDIO-ONLY entry (principal ruling 2026-08-17): the phone eye stays shut until asked for.
-        phoneCameraRequested = false
+        // AUDIO-ONLY entry (principal rulings 2026-08-17 phone / 2026-08-18 glasses, AUR-757):
+        // BOTH eyes stay shut until asked for.
+        cameraRequested = false
         await updateLiveCameraSource()
         watchCameraSource()
 
@@ -1194,7 +1207,7 @@ final class VoiceAgentViewModel: ObservableObject {
         // Stop the phone camera + its watchers (AUR-723b)
         cameraSourceWatch.removeAll()
         phoneCamera.stop()
-        phoneCameraRequested = false
+        cameraRequested = false
         liveCameraSource = .none
 
         // Stop audio playback + release the shared engine (AUR-723)
@@ -1266,33 +1279,69 @@ final class VoiceAgentViewModel: ObservableObject {
         return (s.aiBackend == .openAI && s.isOpenAIConfigured) || s.isGeminiConfigured || s.isOpenAIConfigured
     }
 
-    // MARK: - Live camera source (AUR-723b)
+    // MARK: - Live camera source (AUR-723b / AUR-742a / AUR-757)
 
-    /// Pick the eye for the live session: the glasses when they are actually streaming, the
-    /// iPhone's rear camera otherwise. Frames go down the SAME path either way
-    /// (`sendVideoFrame` → `input_image` item), so the brain sees no difference.
+    /// The glasses can serve as the eye right now: DAT-registered AND a device is connected
+    /// (`startStreaming()` refuses without both). Registration alone is not enough — the Gen 2
+    /// pair is often registered but in its case.
+    var glassesEyeAvailable: Bool {
+        glassesManager.isRegistered && glassesManager.connectedDevice != nil
+    }
+
+    /// Reconcile the eye with the wearer's intent. Nothing is requested → NO eye: the phone
+    /// camera is stopped and a glasses stream we opened is stopped (LED off). Requested → the
+    /// glasses when they are available (start their stream if needed), the iPhone's rear camera
+    /// otherwise. Frames go down the SAME path either way (`sendVideoFrame` → `input_image`
+    /// item), so the brain sees no difference. Re-entrant-safe: it is re-run from the
+    /// `$isStreaming` / `$isRegistered` watchers and after every await it re-reads the intent.
     private func updateLiveCameraSource() async {
-        guard isLiveVideoMode, let service = activeLiveService else { return }
+        guard isLiveVideoMode, activeLiveService != nil else { return }
 
-        if glassesManager.isStreaming {
+        // The pure decision lives in `LiveEyePlan` (unit-tested); this is the side-effect half.
+        switch LiveEyePlan.decide(requested: cameraRequested,
+                                  glassesAvailable: glassesEyeAvailable,
+                                  glassesStreaming: glassesManager.isStreaming) {
+        case .off:
+            // No explicit request → no eye. A session that opened audio-only stays audio-only
+            // (AUR-742a phone, AUR-757 glasses).
             if phoneCamera.isRunning { phoneCamera.stop() }
-            if liveCameraSource != .glasses {
-                liveCameraSource = .glasses
-                ovLog("[VoiceAgent] Live eye: glasses")
+            if glassesManager.isStreaming, !isRecording {
+                await glassesManager.stopStreaming()   // LED off; the server stops receiving frames
             }
-            return
-        }
-
-        // No explicit request → no phone eye. A session that opened audio-only stays audio-only.
-        guard phoneCameraRequested else {
-            if phoneCamera.isRunning { phoneCamera.stop() }
             if liveCameraSource != .none {
                 liveCameraSource = .none
                 ovLog("[VoiceAgent] Live eye: off (audio-only)")
             }
             return
-        }
 
+        case .glasses(let startStream):
+            if startStream {
+                await glassesManager.startStreaming()
+                // The wearer may have dismissed the eye while the stream was coming up.
+                guard cameraRequested, isLiveVideoMode else {
+                    if glassesManager.isStreaming, !isRecording { await glassesManager.stopStreaming() }
+                    return
+                }
+            }
+            if glassesManager.isStreaming {
+                if phoneCamera.isRunning { phoneCamera.stop() }
+                if liveCameraSource != .glasses {
+                    liveCameraSource = .glasses
+                    ovLog("[VoiceAgent] Live eye: glasses")
+                }
+                return
+            }
+            ovLog("[VoiceAgent] Glasses eye requested but the stream did not start — falling back to the phone camera")
+            await startPhoneEye()
+
+        case .phone:
+            await startPhoneEye()
+        }
+    }
+
+    /// The phone half of the eye (AUR-723b). Only ever called with `cameraRequested == true`.
+    private func startPhoneEye() async {
+        guard let service = activeLiveService else { return }
         if phoneCamera.isRunning {
             liveCameraSource = .phone
             return
@@ -1307,8 +1356,9 @@ final class VoiceAgentViewModel: ObservableObject {
         }
         switch await phoneCamera.start() {
         case .started:
+            guard cameraRequested, isLiveVideoMode else { phoneCamera.stop(); return }
             liveCameraSource = .phone
-            ovLog("[VoiceAgent] Live eye: phone camera (no glasses streaming)")
+            ovLog("[VoiceAgent] Live eye: phone camera (no glasses available)")
         case .denied:
             liveCameraSource = .none
             announcePhoneCameraUnavailable("I can't see anything right now — camera access is off for OpenVision. Turn it on in Settings › OpenVision › Camera.")
@@ -1327,16 +1377,18 @@ final class VoiceAgentViewModel: ObservableObject {
         ovLog("[VoiceAgent] Phone camera unavailable: \(message)")
     }
 
-    /// Explicit camera intent — the live UI's toggle and the in-session voice commands.
+    /// Explicit camera intent — the live UI's toggle and the in-session voice commands. Source-
+    /// agnostic: "open the eye" means the glasses when they are there, the phone otherwise
+    /// (AUR-757); "shut the eye" stops whichever one is running.
     func setLiveCamera(_ on: Bool) {
         guard isLiveVideoMode else { return }
-        guard phoneCameraRequested != on else { return }
-        phoneCameraRequested = on
-        ovLog("[VoiceAgent] Camera \(on ? "requested" : "dismissed") by the wearer")
+        guard cameraRequested != on else { return }
+        cameraRequested = on
+        ovLog("[VoiceAgent] Camera \(on ? "requested" : "dismissed") by the wearer (glasses available: \(glassesEyeAvailable))")
         Task { @MainActor in await updateLiveCameraSource() }
     }
 
-    func toggleLiveCamera() { setLiveCamera(!phoneCameraRequested) }
+    func toggleLiveCamera() { setLiveCamera(!cameraRequested) }
 
     /// Inside a session «включи камеру/видео» and «выключи камеру/видео» toggle the EYE, they no
     /// longer switch modes — the conversation itself is entered by tap or wake word (AUR-742a).
@@ -1354,23 +1406,24 @@ final class VoiceAgentViewModel: ObservableObject {
         return false
     }
 
-    /// Follow glasses registration/streaming while live so the eye switches without a restart.
+    /// Follow glasses registration/connection/streaming while live so a REQUESTED eye switches
+    /// without a restart (glasses drop → phone; glasses arrive → glasses). While the eye is not
+    /// requested the watchers stay hands-off (AUR-757): a stream some other feature opened (a POV
+    /// recording) is neither adopted as the eye nor shut down by them.
     private func watchCameraSource() {
         cameraSourceWatch.removeAll()
-        glassesManager.$isStreaming
-            .removeDuplicates()
-            .dropFirst()
-            .sink { [weak self] _ in
-                Task { @MainActor in await self?.updateLiveCameraSource() }
+        let react: (Any) -> Void = { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.cameraRequested || self.liveCameraSource != .none else { return }
+                await self.updateLiveCameraSource()
             }
-            .store(in: &cameraSourceWatch)
-        glassesManager.$isRegistered
-            .removeDuplicates()
-            .dropFirst()
-            .sink { [weak self] _ in
-                Task { @MainActor in await self?.updateLiveCameraSource() }
-            }
-            .store(in: &cameraSourceWatch)
+        }
+        glassesManager.$isStreaming.removeDuplicates().dropFirst()
+            .sink(receiveValue: react).store(in: &cameraSourceWatch)
+        glassesManager.$isRegistered.removeDuplicates().dropFirst()
+            .sink(receiveValue: react).store(in: &cameraSourceWatch)
+        glassesManager.$connectedDevice.map { $0 != nil }.removeDuplicates().dropFirst()
+            .sink(receiveValue: react).store(in: &cameraSourceWatch)
     }
 
     /// Setup live backend callbacks for audio/transcription (Gemini Live or OpenAI Realtime)
