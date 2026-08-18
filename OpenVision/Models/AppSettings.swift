@@ -102,8 +102,11 @@ struct AppSettings: Codable, Equatable {
     /// also detects that on its own and falls back to a buffered request.
     var openAIStreamResponses: Bool = true
 
-    /// Realtime model id used for live audio + video mode (GA gpt-realtime).
-    var openAIRealtimeModel: String = "gpt-realtime"
+    /// AUR-759: which brain answers a live conversation — a MODEL_REGISTRY id the server offers
+    /// (Settings → Voice Control → Voice model), sent as `?model=` on the realtime socket. Empty
+    /// = the server's default. (Older builds stored OpenAI's `gpt-realtime` here; the server treats
+    /// any id it doesn't offer as "default", so that value still means the same thing.)
+    var openAIRealtimeModel: String = ""
 
     /// Voice used by the OpenAI Realtime backend.
     var openAIRealtimeVoice: String = "marin"

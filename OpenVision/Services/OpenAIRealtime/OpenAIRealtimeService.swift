@@ -122,6 +122,9 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
 
     /// Server session id (`session.created`) — replayed as `?resume=` on every reconnect.
     private(set) var sessionId: String?
+    /// AUR-759: the model the server actually resolved for this session (`session.created`
+    /// echoes the registry id, not our request) — what the live-screen chip shows.
+    @Published private(set) var activeModel: String?
     /// True while `disconnect()` was called by us: no reconnect, fire `onDisconnected`.
     private var intentionalClose = false
     /// Bumped on every teardown. A receive loop only acts while its generation is current, so a
@@ -251,6 +254,7 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
         onConnectionStateChanged?(connectionState)
         closeWebSocket()
         sessionId = nil
+        activeModel = nil
         offlineAudio.removeAll(); offlineAudioBytes = 0
         onDisconnected?()
     }
@@ -266,10 +270,12 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
         } else if base.hasPrefix("http://") {
             base = "ws://" + base.dropFirst("http://".count)
         }
-        let model = settings.openAIRealtimeModel.isEmpty
-            ? Constants.OpenAIRealtime.modelName : settings.openAIRealtimeModel
+        // AUR-759: the wearer's pick (a registry id the server offers); empty = server default, so
+        // the parameter is simply left off and the brain applies its REALTIME_MODEL.
+        let model = settings.openAIRealtimeModel.trimmingCharacters(in: .whitespacesAndNewlines)
         var components = URLComponents(string: base + Constants.OpenAIRealtime.websocketPath)
-        var items = [URLQueryItem(name: "model", value: model)]
+        var items: [URLQueryItem] = []
+        if !model.isEmpty { items.append(URLQueryItem(name: "model", value: model)) }
         // The brain uses `?lang=` as the STT/TTS language hint (ru-RU for Margo's rig).
         let locale = settings.speechLocaleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
         if !locale.isEmpty { items.append(URLQueryItem(name: "lang", value: locale)) }
@@ -523,6 +529,7 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
         case "session.created":
             if let session = json["session"] as? [String: Any], let id = session["id"] as? String {
                 sessionId = id
+                if let model = session["model"] as? String, !model.isEmpty { activeModel = model }
             }
             // Push our config, then consider the session ready to stream.
             do {

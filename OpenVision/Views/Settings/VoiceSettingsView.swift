@@ -8,6 +8,8 @@ struct VoiceSettingsView: View {
     // MARK: - Environment
 
     @EnvironmentObject var settingsManager: SettingsManager
+    /// AUR-759: the server's voice-model list (fallback trio until it answers).
+    @StateObject private var voiceModels = VoiceModelChoices.shared
 
     // MARK: - Computed Properties
 
@@ -46,10 +48,53 @@ struct VoiceSettingsView: View {
         return text
     }
 
+    // MARK: - Voice model (AUR-759)
+
+    /// The picker's selection: the stored id when the server offers it, otherwise "Server default"
+    /// (older builds stored OpenAI's `gpt-realtime` here — the server treats it as default too).
+    private var voiceModelSelection: Binding<String> {
+        Binding(
+            get: {
+                let stored = settingsManager.settings.openAIRealtimeModel
+                return voiceModels.choices.contains(where: { $0.id == stored }) ? stored : VoiceModelChoices.serverDefault
+            },
+            set: { settingsManager.settings.openAIRealtimeModel = $0 }
+        )
+    }
+
+    private var voiceModelFooter: String {
+        var text = "Which brain answers in live mode. Applies to the NEXT conversation — a call already running keeps its model until you end it."
+        if let def = voiceModels.serverDefaultId {
+            text += " Server default is currently \(voiceModels.displayName(for: def))."
+        }
+        if !voiceModels.isFromServer {
+            text += settingsManager.settings.isOpenAIConfigured
+                ? " (Built-in list — the server hasn't answered yet.)"
+                : " (Built-in list — set the OpenAI backend's Endpoint and API Key to load the server's list.)"
+        }
+        return text
+    }
+
     // MARK: - Body
 
     var body: some View {
         Form {
+            // Voice model (AUR-759) — the brain behind live mode.
+            Section {
+                Picker("Voice Model", selection: voiceModelSelection) {
+                    Text(voiceModels.serverDefaultId.map { "Server default (\(voiceModels.displayName(for: $0)))" } ?? "Server default")
+                        .tag(VoiceModelChoices.serverDefault)
+                    ForEach(voiceModels.choices) { choice in
+                        Text(choice.displayName).tag(choice.id)
+                    }
+                }
+            } header: {
+                Text("Voice Model")
+            } footer: {
+                Text(voiceModelFooter)
+            }
+            .task { await voiceModels.refresh() }
+
             // Language Section — governs BOTH speech recognition and the TTS voice.
             Section {
                 Picker("Language", selection: $settingsManager.settings.speechLocaleIdentifier) {

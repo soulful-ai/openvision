@@ -157,6 +157,23 @@ struct VoiceAgentView: View {
                 )
                 .padding(.leading, 6)
                 .accessibilityLabel("Live camera source: \(viewModel.liveCameraSource.label)")
+
+                // AUR-759: which brain is answering (the server's resolved model for this session).
+                if let model = viewModel.liveModel {
+                    HStack(spacing: 4) {
+                        Image(systemName: "brain")
+                            .font(.caption2)
+                        Text(VoiceModelChoices.shared.displayName(for: model))
+                            .font(.caption2.bold())
+                            .lineLimit(1)
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(Color.purple.opacity(0.75)))
+                    .padding(.leading, 6)
+                    .accessibilityLabel("Voice model: \(VoiceModelChoices.shared.displayName(for: model))")
+                }
             } else {
                 StatusPill(
                     status: settingsManager.settings.backendDisplayName,

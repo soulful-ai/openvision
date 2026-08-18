@@ -63,6 +63,7 @@
 		800BD44B75446351A267E190 /* OpenAISettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D83F733F1799E2675A34CC4 /* OpenAISettingsView.swift */; };
 		81F38E617E61131E8C87620B /* MWDATCore in Frameworks */ = {isa = PBXBuildFile; productRef = A7FF778329794C28B434EEAA /* MWDATCore */; };
 		8351C940EEB51503B73F3449 /* KokoroSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F363A639A7050AFBDFAF486 /* KokoroSettingsView.swift */; };
+		84B1D84A04A576AF3E221398 /* VoiceModelChoices.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AB39C88AC270608DA97A983 /* VoiceModelChoices.swift */; };
 		88419FB22964F22C4FB748C2 /* ClipboardTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = F45F55A97C67CC055B44A349 /* ClipboardTool.swift */; };
 		8BB3557D9BE4E9F2399BDBC1 /* VoiceAgentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 601D21AA8114E457F40C6C4A /* VoiceAgentView.swift */; };
 		A0C761B8F65AD0892D3FB6E3 /* PhoneCameraService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BAC1716146D3E2731035A11 /* PhoneCameraService.swift */; };
@@ -142,6 +143,7 @@
 		45142B60B3D9295D07A3107F /* PomodoroTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PomodoroTool.swift; sourceTree = "<group>"; };
 		4831CE885B0320D9CAD71736 /* NotificationForegroundPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationForegroundPresenter.swift; sourceTree = "<group>"; };
 		484468B5604EFF4051074762 /* MemoriesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoriesView.swift; sourceTree = "<group>"; };
+		4AB39C88AC270608DA97A983 /* VoiceModelChoices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceModelChoices.swift; sourceTree = "<group>"; };
 		4F363A639A7050AFBDFAF486 /* KokoroSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KokoroSettingsView.swift; sourceTree = "<group>"; };
 		516A0726470BFA8BD9B55F3F /* AdditionalInstructionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdditionalInstructionsView.swift; sourceTree = "<group>"; };
 		529F4C0838CFE7F8F55E28E4 /* AudioPlaybackService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPlaybackService.swift; sourceTree = "<group>"; };
@@ -257,6 +259,7 @@
 			isa = PBXGroup;
 			children = (
 				422747099A4406E793760E57 /* OpenAIRealtimeService.swift */,
+				4AB39C88AC270608DA97A983 /* VoiceModelChoices.swift */,
 			);
 			path = OpenAIRealtime;
 			sourceTree = "<group>";
@@ -834,6 +837,7 @@
 				8BB3557D9BE4E9F2399BDBC1 /* VoiceAgentView.swift in Sources */,
 				D8F7D3BE11230D5DE55E8D18 /* VoiceAgentViewModel.swift in Sources */,
 				342B57112073CFC14CD78614 /* VoiceCommandService.swift in Sources */,
+				84B1D84A04A576AF3E221398 /* VoiceModelChoices.swift in Sources */,
 				3A3AC3A91A768EAE0B643B95 /* VoiceSelectionView.swift in Sources */,
 				79C519EDCA508C00DAAB1F6E /* VoiceSettingsView.swift in Sources */,
 				1339DF5D7DB28F0048D95846 /* WebSearchService.swift in Sources */,

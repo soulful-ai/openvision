@@ -43,6 +43,10 @@ final class VoiceAgentViewModel: ObservableObject {
     /// Audio rig in use while a live session runs ("a2dp+phone-mic", "hfp+bt-mic", …) — AUR-723.
     @Published var liveRoute: String = "unknown"
 
+    /// AUR-759: the brain the server resolved for the running live session (registry id, e.g.
+    /// "gemini-3-flash-preview") — the small chip next to LIVE. nil = not live / not the brain.
+    @Published var liveModel: String?
+
     /// Which eye is feeding the live session (AUR-723b). Glasses first; the phone's own rear
     /// camera when none are paired — before this, a phone-only rig sent NO frames at all and
     /// "what do you see" had nothing to describe.
@@ -472,6 +476,13 @@ final class VoiceAgentViewModel: ObservableObject {
         aiTranscript = ""
         currentToolName = nil
         isLiveVideoMode = false
+        liveModel = nil
+    }
+
+    /// AUR-760: the phone's own mic gets a modest boost (a normal voice from ~1 m came in around
+    /// −40 dBFS — Anton had to shout across the room); the glasses mic is left alone.
+    private func applyInputGain(for routeTag: String) {
+        audioCapture.inputGain = routeTag.hasSuffix("phone-mic") ? AudioCaptureService.phoneMicGain : 1
     }
 
     /// Full stop for "Ok Vision stop": silence all output, cancel any in-flight generation, and go
@@ -990,7 +1001,8 @@ final class VoiceAgentViewModel: ObservableObject {
         liveRoute = AudioSessionManager.shared.routeInfo.tag
         openAIRealtime.routeTag = liveRoute
         openAIRealtime.aecActive = AudioSessionManager.shared.clientAECActive
-        ovLog("[VoiceAgent] Live audio rig: \(liveRoute), client AEC: \(openAIRealtime.aecActive)")
+        applyInputGain(for: liveRoute)
+        ovLog("[VoiceAgent] Live audio rig: \(liveRoute), client AEC: \(openAIRealtime.aecActive), input gain: \(audioCapture.inputGain)")
 
         // AUR-757: the conversation starts AUDIO-ONLY even with DAT glasses registered and
         // connected — the glasses camera is NOT started here any more (it used to be, "only when
@@ -1020,6 +1032,8 @@ final class VoiceAgentViewModel: ObservableObject {
 
         // Setup live backend callbacks
         setupLiveVideoCallbacks(service)
+        // AUR-759: `connect()` returned after `session.created`, so the resolved model is known.
+        liveModel = (service as? OpenAIRealtimeService)?.activeModel
 
         // Setup audio capture → live backend (continuous: no isModelSpeaking gate any more)
         audioCapture.onAudioCaptured = { [weak service] data in
@@ -1040,6 +1054,7 @@ final class VoiceAgentViewModel: ObservableObject {
             self.openAIRealtime.routeTag = info.tag
             // A route that moves the mic to the glasses withdraws the AEC claim (and back again).
             self.openAIRealtime.aecActive = AudioSessionManager.shared.clientAECActive
+            self.applyInputGain(for: info.tag)
         }
 
         // Setup audio playback (ring buffer with pause / flush / played-ms accounting)
