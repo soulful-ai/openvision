@@ -25,6 +25,13 @@ final class AudioCaptureChunker: @unchecked Sendable {
     /// Called on the audio thread with the RMS of each converted buffer (0…1).
     var onLevel: ((Float) -> Void)?
 
+    /// AUR-760: linear gain applied to the converted samples (1 = untouched). The phone's built-in
+    /// mic delivers a normal voice from a metre away at ~−40 dBFS even with VPIO's AGC — the brain's
+    /// phone-profile noise gate then hears "quiet room". A modest fixed boost (with a hard clamp)
+    /// puts it back in the band the server was tuned on. Never applied to the glasses mic (its
+    /// profile already expects the quiet HFP voice, and its echo path is not the phone's to fix).
+    var gain: Float = 1
+
     private var pending = Data()
     private let lock = NSLock()
     private var converter: AVAudioConverter?
@@ -47,8 +54,13 @@ final class AudioCaptureChunker: @unchecked Sendable {
         let frameLength = Int(converted.frameLength)
         guard frameLength > 0, let int16 = converted.int16ChannelData else { return }
 
+        let gain = self.gain
         var sumSquares: Double = 0
         for i in 0..<frameLength {
+            if gain != 1 {
+                let boosted = Float(int16[0][i]) * gain
+                int16[0][i] = Int16(max(Float(Int16.min), min(Float(Int16.max), boosted)))
+            }
             let s = Double(int16[0][i]) / Double(Int16.max)
             sumSquares += s * s
         }
@@ -152,6 +164,14 @@ final class AudioCaptureService: ObservableObject {
 
     /// Frame duration in milliseconds (AUR-723: 40 ms).
     var chunkDurationMs: Int = Constants.RealtimeAudio.captureFrameMs
+
+    /// AUR-760: linear input gain on the captured samples (see AudioCaptureChunker.gain). Set per
+    /// mic route by the live rig: a modest boost on the phone mic, 1 on the glasses.
+    var inputGain: Float = 1 {
+        didSet { chunker?.gain = inputGain }
+    }
+    /// The phone-mic boost, +9.5 dB. Enough for a normal voice across a room; the clamp catches shouting.
+    static let phoneMicGain: Float = 3.0
 
     // MARK: - Start/Stop
 
@@ -272,6 +292,7 @@ final class AudioCaptureService: ObservableObject {
     /// Rebuild the chunker for a new target rate / frame size. Call before `startCapture`.
     func applyFormatSettings() {
         chunker = AudioCaptureChunker(targetSampleRate: targetSampleRate, frameMs: chunkDurationMs)
+        chunker?.gain = inputGain
     }
 }
 
