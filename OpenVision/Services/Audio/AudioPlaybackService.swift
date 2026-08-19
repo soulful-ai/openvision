@@ -430,6 +430,7 @@ final class AudioPlaybackService: ObservableObject, RealtimePlaybackSink {
         // (the session recorder taps the main mixer).
         let mixer = AVAudioMixerNode()
         self.mixerNode = mixer
+        mixer.outputVolume = silenced ? 0 : (ducked ? 0.15 : 1.0)   // a rebuilt graph keeps the mute
 
         engine.attach(source)
         engine.attach(mixer)
@@ -604,7 +605,25 @@ final class AudioPlaybackService: ObservableObject, RealtimePlaybackSink {
     }
 
     func duck(_ ducked: Bool) {
-        mixerNode?.outputVolume = ducked ? 0.15 : 1.0
+        self.ducked = ducked
+        applyMixerGain()
+    }
+
+    /// AUR-776 silent mode (video.silent / listen): the assistant's audio is MUTED locally while the
+    /// recording runs. The ring keeps draining (items still complete → `aurelia.playback.done`
+    /// still releases the server's hold), only the mixer gain is 0 — belt to the server's own
+    /// suppression braces. A duck/resume while silenced never lifts the mute.
+    var silenced: Bool = false {
+        didSet {
+            guard silenced != oldValue else { return }
+            ovLog("[AudioPlayback] assistant audio \(silenced ? "MUTED (silent recording)" : "unmuted")")
+            applyMixerGain()
+        }
+    }
+    private var ducked = false
+
+    private func applyMixerGain() {
+        mixerNode?.outputVolume = silenced ? 0 : (ducked ? 0.15 : 1.0)
     }
 
     func headPlayedMs() -> (itemId: String, playedMs: Double)? {

@@ -20,6 +20,8 @@
 //
 //   client → server: aurelia.playback.done {item_id, played_ms} when an item finishes playing
 //                    (ends the server's play-out hold), conversation.item.truncate on every cut.
+//   aurelia.action {id, action, mode}                AUR-776: photo / video / listen — earcon + do it
+//   client → server: aurelia.action.ack {id, ok, artifact}, aurelia.action.request (UI buttons)
 //
 // Any socket drop (pod swap, Cloudflare, phone sleep) reconnects with `?resume=<session_id>` on an
 // exponential backoff, keeping the session id — the wearer hears a hiccup, not "Live mode ended"
@@ -586,6 +588,17 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
             let reason = (json["reason"] as? String) ?? "user_request"
             endAfterFarewell(reason: reason)
 
+        // ── AUR-776: a fast voice action (photo / video / listen) the brain recognised ────────
+        case "aurelia.action":
+            if let action = VoiceAction(json: json) {
+                onAction?(action)
+            } else {
+                let raw = (json["action"] as? String) ?? "?"
+                let id = (json["id"] as? String) ?? UUID().uuidString
+                ovLog("[OpenAIRealtime] Unknown aurelia.action \"\(raw)\" — nacking")
+                sendActionAck(VoiceActionAck(id: id, action: raw, ok: false, detail: "unknown action", artifact: nil))
+            }
+
         // ── AUR-728: the pod is going away — reconnect on the hint, keep the session ──────────
         case "aurelia.server.draining":
             if let id = json["session_id"] as? String { sessionId = id }
@@ -668,6 +681,29 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
         default:
             break
         }
+    }
+
+    // MARK: - Fast voice actions (AUR-776 client half)
+
+    /// The brain says "do it now": photo / video.start / video.stop / audio.start / audio.stop.
+    /// The ViewModel performs it (earcon first) and answers with `sendActionAck`.
+    var onAction: ((VoiceAction) -> Void)?
+
+    /// `{ type:"aurelia.action.ack", id, action, ok, detail, artifact }`.
+    func sendActionAck(_ ack: VoiceActionAck) {
+        send(ack.json)
+    }
+
+    /// A UI control asked for an action. The server echoes `aurelia.action` so the state stays
+    /// single-sourced (voice and buttons go through the same path).
+    func requestAction(_ kind: VoiceActionKind, mode: VoiceActionMode? = nil, source: String = "button") {
+        guard connectionState.isUsable else {
+            ovLog("[OpenAIRealtime] action.request \(kind.rawValue) dropped — socket not usable")
+            return
+        }
+        var payload: [String: Any] = ["type": "aurelia.action.request", "action": kind.rawValue, "source": source]
+        if let mode { payload["mode"] = mode.rawValue }
+        send(payload)
     }
 
     // MARK: - Barge-in execution

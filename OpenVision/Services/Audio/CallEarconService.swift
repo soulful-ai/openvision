@@ -10,7 +10,8 @@
 //
 // The cues replace the spoken "Live video mode active / ended" (field ruling 2026-08-19 — "it's not
 // video, it's annoying"): short, soft, Meta-style — an ascending pair on start, a descending pair
-// on end.
+// on end. AUR-776 added the fast-action cues (photo tick, video rising/falling triple, listen
+// pair) — same engine, same route, each ≤ 300 ms.
 
 import AVFoundation
 import Foundation
@@ -29,13 +30,29 @@ final class CallEarconService {
         case callStart
         /// The call is over: two soft descending tones (A5 → D5, ~250 ms).
         case callEnd
+        // ── AUR-776 fast voice actions (Meta-style "Hey Meta, take a photo" cues) ──────────────
+        /// Photo taken: one crisp shutter-like tick (E7 30 ms → E6 50 ms, ~80 ms).
+        case photo
+        /// Video recording started: rising triple (C5 → E5 → G5, 3 × 80 ms = 240 ms).
+        case videoStart
+        /// Video recording stopped: falling triple (G5 → E5 → C5, 240 ms).
+        case videoStop
+        /// Listen / audio recording started: two equal soft tones (D5, D5; 90 + 40 rest + 90 ms).
+        case audioStart
+        /// Listen / audio recording stopped: the same pair, lower (A4, A4).
+        case audioStop
 
         /// (frequency Hz, duration s) per note, peak amplitude. Quiet on purpose — on HFP these
-        /// land right in the ear.
+        /// land right in the ear. `hz == 0` is a rest (silence) between pulses.
         var notes: [(hz: Double, seconds: Double)] {
             switch self {
-            case .callStart: return [(659.25, 0.11), (880.00, 0.14)]
-            case .callEnd:   return [(880.00, 0.11), (587.33, 0.14)]
+            case .callStart:  return [(659.25, 0.11), (880.00, 0.14)]
+            case .callEnd:    return [(880.00, 0.11), (587.33, 0.14)]
+            case .photo:      return [(2637.02, 0.03), (1318.51, 0.05)]
+            case .videoStart: return [(523.25, 0.08), (659.25, 0.08), (783.99, 0.08)]
+            case .videoStop:  return [(783.99, 0.08), (659.25, 0.08), (523.25, 0.08)]
+            case .audioStart: return [(587.33, 0.09), (0, 0.04), (587.33, 0.09)]
+            case .audioStop:  return [(440.00, 0.09), (0, 0.04), (440.00, 0.09)]
             }
         }
 
@@ -43,13 +60,21 @@ final class CallEarconService {
             switch self {
             case .callStart: return 0.18
             case .callEnd:   return 0.16
+            case .photo:     return 0.24
+            case .videoStart, .videoStop: return 0.18
+            case .audioStart, .audioStop: return 0.16
             }
         }
 
         var label: String {
             switch self {
-            case .callStart: return "start"
-            case .callEnd:   return "end"
+            case .callStart:  return "start"
+            case .callEnd:    return "end"
+            case .photo:      return "photo"
+            case .videoStart: return "video.start"
+            case .videoStop:  return "video.stop"
+            case .audioStart: return "audio.start"
+            case .audioStop:  return "audio.stop"
             }
         }
     }
@@ -155,12 +180,18 @@ final class CallEarconService {
         }
         buf.frameLength = AVAudioFrameCount(totalFrames)
         guard let out = buf.floatChannelData?[0] else { return nil }
+        out.initialize(repeating: 0, count: totalFrames)   // rests rely on zeroed memory
 
         let attack = 0.006 * sampleRate
         let release = 0.015 * sampleRate
         var cursor = 0
         for note in cue.notes {
             let n = Int(note.seconds * sampleRate)
+            guard note.hz > 0 else {
+                // A rest: leave the zeros in place.
+                cursor += n
+                continue
+            }
             let w = 2.0 * Double.pi * note.hz / sampleRate
             for i in 0..<n {
                 let t = Double(i)

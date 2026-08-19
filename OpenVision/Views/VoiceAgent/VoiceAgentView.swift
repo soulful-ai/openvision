@@ -184,6 +184,14 @@ struct VoiceAgentView: View {
 
             Spacer()
 
+            // AUR-776: REC / LISTEN badge with elapsed time while a voice-action recording runs.
+            RecordingBadge(actions: viewModel.voiceActions)
+
+            // AUR-776: transient action outcome ("Photo saved", …).
+            if viewModel.recordingStatus == nil {
+                ActionStatusPill(actions: viewModel.voiceActions)
+            }
+
             // Transient "Saved to Photos" / failure status after a recording finishes.
             if let status = viewModel.recordingStatus {
                 Text(status)
@@ -349,6 +357,17 @@ struct VoiceAgentView: View {
                             .background(Capsule().stroke(Theme.textSecondary.opacity(0.35), lineWidth: 1))
                     }
                 }
+            }
+
+            // AUR-776: Photo · Video · Listen — fast actions, same path as the voice phrases.
+            if viewModel.voiceActionsAvailable {
+                VoiceActionBar(
+                    actions: viewModel.voiceActions,
+                    onPhoto: { viewModel.tapPhoto() },
+                    onVideo: { mode in viewModel.tapVideo(mode: mode) },
+                    onListen: { viewModel.tapListen() }
+                )
+                .transition(.opacity)
             }
 
             // Status text

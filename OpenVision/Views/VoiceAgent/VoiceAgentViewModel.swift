@@ -10,6 +10,7 @@
 import SwiftUI
 import Speech
 import Combine
+import AVFoundation
 
 @MainActor
 final class VoiceAgentViewModel: ObservableObject {
@@ -28,6 +29,8 @@ final class VoiceAgentViewModel: ObservableObject {
     let phoneCamera = PhoneCameraService.shared
     let audioPlayback = AudioPlaybackService()
     let sessionRecorder = SessionRecorder.shared
+    /// AUR-776: fast voice actions (photo / video / listen) driven by the brain's `aurelia.action`.
+    let voiceActions = VoiceActionService()
 
     // MARK: - Published UI state
 
@@ -1085,9 +1088,11 @@ final class VoiceAgentViewModel: ObservableObject {
         // AUR-759: `connect()` returned after `session.created`, so the resolved model is known.
         liveModel = (service as? OpenAIRealtimeService)?.activeModel
 
-        // Setup audio capture → live backend (continuous: no isModelSpeaking gate any more)
-        audioCapture.onAudioCaptured = { [weak service] data in
+        // Setup audio capture → live backend (continuous: no isModelSpeaking gate any more).
+        // AUR-776: the same frames are tee'd to the listen-mode backup writer (no-op otherwise).
+        audioCapture.onAudioCaptured = { [weak service, weak self] data in
             service?.sendAudio(data: data)
+            self?.voiceActions.appendMicAudio(data)
         }
 
         // ONE engine for capture + playback (AUR-723); route churn reinstalls the tap in place.
@@ -1118,6 +1123,16 @@ final class VoiceAgentViewModel: ObservableObject {
         // backends keep going through `onAudioReceived`.
         if let realtime = service as? OpenAIRealtimeService {
             realtime.playback = audioPlayback
+            // AUR-776: fast voice actions — the brain recognised «сфоткай» / "record a video" /
+            // "listen": earcon first, then the device work, then the ack on the socket.
+            voiceActions.host = self
+            realtime.onAction = { [weak self, weak realtime] action in
+                Task { @MainActor in
+                    guard let self else { return }
+                    let ack = await self.voiceActions.perform(action)
+                    realtime?.sendActionAck(ack)
+                }
+            }
         }
 
         // Start audio capture
@@ -1267,6 +1282,12 @@ final class VoiceAgentViewModel: ObservableObject {
         // AUR-772: did the SERVER end this call after speaking its goodbye? Then the wearer has
         // already heard the conversation end, in the call's own route — no second announcement.
         let serverSaidGoodbye = (activeLiveService as? OpenAIRealtimeService)?.endedAfterFarewell == true
+
+        // AUR-776: a voice-action recording (video / listen) ends with the call — finalise + save
+        // BEFORE the glasses stream and the mic go down, then lift the local mute.
+        await voiceActions.sessionEnded()
+        openAIRealtime.onAction = nil
+        audioPlayback.silenced = false
 
         // Stop audio capture
         audioCapture.stopCapture()
@@ -1489,11 +1510,16 @@ final class VoiceAgentViewModel: ObservableObject {
     @discardableResult
     private func handleCameraCommand(_ text: String) -> Bool {
         let t = text.lowercased()
-        let off = ["выключи камеру", "выключи видео", "останови камеру", "останови видео",
-                   "стоп камера", "стоп камеру", "стоп видео", "убери камеру",
-                   "camera off", "turn off camera", "stop camera", "stop video", "stop the camera"]
-        let on = ["включи камеру", "включи видео", "покажи камеру", "открой камеру",
-                  "camera on", "turn on camera", "start camera", "start video", "show camera"]
+        // AUR-776: CAMERA words only. "video" words («включи видео» / "start video" / "stop
+        // video") now mean RECORDING and are the brain's call (`aurelia.action video.start/stop`),
+        // so they are no longer interpreted here — three camera modes: eye-only (these phrases),
+        // video.silent, video.assist (recording + this same eye).
+        let off = ["выключи камеру", "останови камеру", "стоп камера", "стоп камеру", "убери камеру",
+                   "закрой камеру", "camera off", "turn off camera", "stop camera", "stop the camera",
+                   "close camera", "close the camera"]
+        let on = ["включи камеру", "покажи камеру", "открой камеру",
+                  "camera on", "turn on camera", "start camera", "show camera", "open camera",
+                  "open the camera"]
         if off.contains(where: { t.contains($0) }) { setLiveCamera(false); return true }
         if on.contains(where: { t.contains($0) }) { setLiveCamera(true); return true }
         return false
@@ -1537,11 +1563,14 @@ final class VoiceAgentViewModel: ObservableObject {
 
                 // Check for stop video commands in what the user said
                 let lowerText = text.lowercased()
-                let stopKeywords = ["stop video", "stop streaming", "stop live", "end video",
-                                   "exit video", "disable video", "stop the video", "end live",
-                                   "стоп видео", "выключи видео", "останови видео", "заверши видео", "стоп стрим", "выключи стрим",
+                // AUR-776: "stop video" / «стоп видео» are NOT hang-ups any more — the brain maps
+                // them to `aurelia.action video.stop` (a recording stop); hang-up by voice is the
+                // brain's `aurelia.session.close` (AUR-746). Only the explicit "live/stream" words
+                // stay as a local fallback.
+                let stopKeywords = ["stop streaming", "stop live", "end live", "exit live",
+                                   "стоп стрим", "выключи стрим", "заверши стрим",
                                    // Hindi fallbacks (models sometimes transcribe English as Hindi)
-                                   "स्टॉप", "वीडियो बंद", "बंद करो", "रुको"]
+                                   "स्टॉप", "बंद करो", "रुको"]
 
                 let isStopCommand = stopKeywords.contains { lowerText.contains($0) }
 
@@ -1619,17 +1648,40 @@ final class VoiceAgentViewModel: ObservableObject {
     }
 
     private func startRecording() async {
-        guard glassesManager.isRegistered else {
-            errorMessage = "Connect your glasses first to record."
-            return
+        do {
+            try await startPOVRecordingCore()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    enum POVRecordingError: LocalizedError {
+        case noGlasses
+        case streamDidNotStart
+        case recorder(String)
+        var errorDescription: String? {
+            switch self {
+            case .noGlasses: return "Connect your glasses first to record."
+            case .streamDidNotStart: return "Couldn't start the glasses camera to record."
+            case .recorder(let reason): return "Recording failed to start: \(reason)"
+            }
+        }
+    }
+
+    /// The one POV-recording start, shared by the record button and the AUR-776 `video.start`
+    /// action: glasses stream up (LED on), raw frames → SessionRecorder, mic (+ assistant voice
+    /// via the playback tap) muxed by the recorder, saved to Photos on stop.
+    private func startPOVRecordingCore() async throws {
+        guard !isRecording else { return }
+        guard glassesManager.isRegistered, glassesManager.connectedDevice != nil else {
+            throw POVRecordingError.noGlasses
         }
         // Recording needs a live frame stream; start it if the user isn't already in live video.
         if !glassesManager.isStreaming {
             await glassesManager.startStreaming()
         }
         guard glassesManager.isStreaming else {
-            errorMessage = "Couldn't start the glasses camera to record."
-            return
+            throw POVRecordingError.streamDidNotStart
         }
 
         // Route the raw glasses frames into the recorder. This is separate from `onVideoFrame`
@@ -1650,8 +1702,30 @@ final class VoiceAgentViewModel: ObservableObject {
             isRecording = true
         } catch {
             glassesManager.onVideoSampleBuffer = nil
-            errorMessage = "Recording failed to start: \(error.localizedDescription)"
+            throw POVRecordingError.recorder(error.localizedDescription)
         }
+    }
+
+    /// Stop the POV recorder and wait for the saved file (nil = nothing saved / not recording).
+    /// The glasses stream is left to `updateLiveCameraSource` (it is closed when no eye wants it)
+    /// or stays up for the live eye.
+    private func stopPOVRecordingAwaiting() async -> URL? {
+        guard isRecording else { return nil }
+        let saved: URL? = await withCheckedContinuation { (cont: CheckedContinuation<URL?, Never>) in
+            var resumed = false
+            sessionRecorder.onFinished = { [weak self] url in
+                guard let self else { if !resumed { resumed = true; cont.resume(returning: url) }; return }
+                self.isRecording = false
+                self.glassesManager.onVideoSampleBuffer = nil
+                self.showRecordingStatus(url != nil ? "Saved to Photos" : "Couldn't save recording")
+                if !resumed { resumed = true; cont.resume(returning: url) }
+            }
+            sessionRecorder.stop()
+        }
+        // Outside a live session the stream was opened only for this recording — LED off.
+        if !isLiveVideoMode, glassesManager.isStreaming { await glassesManager.stopStreaming() }
+        else if isLiveVideoMode { await updateLiveCameraSource() }
+        return saved
     }
 
     /// Show a brief status message after a recording finishes, then clear it.
@@ -2184,5 +2258,93 @@ enum TextChunking {
         let tail = current.trimmingCharacters(in: .whitespacesAndNewlines)
         if !tail.isEmpty { result.append(tail) }
         return result
+    }
+}
+
+
+// MARK: - AUR-776 fast voice actions (UI entry + device work)
+
+extension VoiceAgentViewModel {
+
+    /// The action row is shown only when the brain can echo `aurelia.action` (realtime socket).
+    var voiceActionsAvailable: Bool {
+        isLiveVideoMode && activeLiveService is OpenAIRealtimeService
+    }
+
+    /// A button tap: the server echoes `aurelia.action`, the action runs on that echo — voice
+    /// and buttons share one path, the state is single-sourced.
+    func requestVoiceAction(_ kind: VoiceActionKind, mode: VoiceActionMode? = nil) {
+        guard openAIRealtime.connectionState.isUsable else {
+            errorMessage = "Not connected to the brain"
+            return
+        }
+        openAIRealtime.requestAction(kind, mode: mode, source: "button")
+    }
+
+    /// Photo button.
+    func tapPhoto() { requestVoiceAction(.photo) }
+
+    /// Video button: toggles silent video; long-press offers assist (see the view).
+    func tapVideo(mode: VoiceActionMode = .silent) {
+        if voiceActions.videoRecording != nil { requestVoiceAction(.videoStop) }
+        else { requestVoiceAction(.videoStart, mode: mode) }
+    }
+
+    /// Listen button.
+    func tapListen() {
+        if voiceActions.audioRecording != nil { requestVoiceAction(.audioStop) }
+        else { requestVoiceAction(.audioStart) }
+    }
+}
+
+extension VoiceAgentViewModel: VoiceActionHost {
+
+    var earconEngine: AVAudioEngine? { AudioSessionManager.shared.sharedEngine }
+
+    var micSampleRate: Double { audioCapture.targetSampleRate }
+
+    /// One still for `photo`. Glasses POV first (a FRESH frame off the DAT stream — the SDK's
+    /// one-shot `capturePhoto` times out on this model, the stream frame is immediate); the
+    /// phone camera's last frame when its eye is open; nil otherwise. Click-and-go: a stream
+    /// opened only for the photo is closed again (LED off) unless the eye or a recording wants it.
+    func captureStill() async -> (jpeg: Data, source: String)? {
+        if glassesEyeAvailable {
+            let wasStreaming = glassesManager.isStreaming
+            if let jpeg = await freshLiveFrame() {
+                if !wasStreaming, !cameraRequested, !isRecording, glassesManager.isStreaming {
+                    await glassesManager.stopStreaming()
+                }
+                return (jpeg, "glasses")
+            }
+            if !wasStreaming, !cameraRequested, !isRecording, glassesManager.isStreaming {
+                await glassesManager.stopStreaming()
+            }
+        }
+        if phoneCamera.isRunning, let frame = phoneCamera.lastFrame,
+           let jpeg = frame.jpegData(compressionQuality: 0.85) {
+            return (jpeg, "phone")
+        }
+        return nil
+    }
+
+    func startPOVRecording() async throws {
+        try await startPOVRecordingCore()
+    }
+
+    func stopPOVRecording() async -> URL? {
+        await stopPOVRecordingAwaiting()
+    }
+
+    func setEyeOpen(_ open: Bool) async {
+        guard isLiveVideoMode else { return }
+        if cameraRequested != open {
+            cameraRequested = open
+            ovLog("[VoiceAgent] Camera \(open ? "requested" : "dismissed") by a voice action (glasses available: \(glassesEyeAvailable))")
+        }
+        await updateLiveCameraSource()
+    }
+
+    func setAssistantPlaybackSilenced(_ silenced: Bool) {
+        audioPlayback.silenced = silenced
     }
 }
