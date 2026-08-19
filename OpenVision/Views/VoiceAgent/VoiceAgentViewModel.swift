@@ -2308,6 +2308,10 @@ extension VoiceAgentViewModel: VoiceActionHost {
 
     var micSampleRate: Double { audioCapture.targetSampleRate }
 
+    /// AUR-785: with the glasses eye available, `captureStill` tries the NATIVE pipeline first —
+    /// whose hardware shutter is the audible feedback, so the service holds its own tick.
+    var nativeCaptureLikely: Bool { glassesEyeAvailable }
+
     /// One still for `photo`. Glasses first, best quality first (AUR-783):
     ///   1. NATIVE capture — the glasses' own photo pipeline via `captureNativePhoto` (the Meta-AI
     ///      quality still). The AUR-776 timeout is fixed at the root: the SDK silently drops the
@@ -2316,7 +2320,9 @@ extension VoiceAgentViewModel: VoiceActionHost {
     ///   2. Fresh 720p frame off the DAT stream when native times out / is refused.
     ///   3. The phone camera's last frame when its eye is open; nil otherwise.
     /// Click-and-go: a stream opened only for the photo is closed again (LED off) unless the eye
-    /// or a recording wants it.
+    /// or a recording wants it — or a temp eye.on for THIS photo turn is already queued (AUR-785:
+    /// the server temp-opens the eye right after `photo`; closing the stream here would be an
+    /// LED off→on flap and a second stream session for one photo).
     func captureStill() async -> (jpeg: Data, source: String)? {
         if glassesEyeAvailable {
             let wasStreaming = glassesManager.isStreaming
@@ -2327,7 +2333,8 @@ extension VoiceAgentViewModel: VoiceActionHost {
             } else if let jpeg = await freshLiveFrame() {
                 still = (jpeg, "stream frame\(Self.pixelTag(jpeg))")
             }
-            if !wasStreaming, !cameraRequested, !isRecording, glassesManager.isStreaming {
+            if !wasStreaming, !cameraRequested, !isRecording, !voiceActions.tempEyeOpenPending,
+               glassesManager.isStreaming {
                 await glassesManager.stopStreaming()
             }
             if let still { return still }

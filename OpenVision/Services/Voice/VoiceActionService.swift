@@ -9,7 +9,9 @@
 //                    server echoes `aurelia.action` so the state is single-sourced)
 //
 // Actions and what they do on the phone:
-//   photo              earcon → NATIVE glasses capture first (AUR-783: the glasses' own photo
+//   photo              ONE shutter, Meta-style (AUR-785): the NATIVE capture's hardware shutter
+//                      when that path wins, our tick only when it does not (stream-frame / phone
+//                      fallback). NATIVE glasses capture first (AUR-783: the glasses' own photo
 //                      pipeline via captureNativePhoto — the AUR-776 "timeout" was a request sent
 //                      before the stream was really live, silently dropped by the SDK), falling
 //                      back to a fresh 720p frame off the POV stream → Photos +
@@ -80,19 +82,32 @@ struct VoiceAction: Equatable {
     let kind: VoiceActionKind
     /// As sent by the server (nil when the action has no mode, e.g. photo / stop).
     let mode: VoiceActionMode?
+    /// AUR-785: the server's tag on TEMPORARY eye events around a photo — `tail: "for this turn"`
+    /// on the eye.on, `"end of the photo turn"` on the eye.off. nil on everything else.
+    let tail: String?
 
-    init(id: String, kind: VoiceActionKind, mode: VoiceActionMode?) {
+    init(id: String, kind: VoiceActionKind, mode: VoiceActionMode?, tail: String? = nil) {
         self.id = id
         self.kind = kind
         self.mode = mode
+        self.tail = tail
     }
 
-    /// `{ "type": "aurelia.action", "id": "...", "action": "...", "mode": "silent"|"assist"|null }`
+    /// `{ "type": "aurelia.action", "id": "...", "action": "...", "mode": "silent"|"assist"|null,
+    ///    "tail": "for this turn"|"end of the photo turn"|absent }`
     init?(json: [String: Any]) {
         guard let raw = json["action"] as? String, let parsed = VoiceActionKind.parse(raw) else { return nil }
         let id = (json["id"] as? String) ?? UUID().uuidString
         let explicit = (json["mode"] as? String).flatMap(VoiceActionMode.init(rawValue:))
-        self.init(id: id, kind: parsed.kind, mode: explicit ?? parsed.impliedMode)
+        self.init(id: id, kind: parsed.kind, mode: explicit ?? parsed.impliedMode,
+                  tail: json["tail"] as? String)
+    }
+
+    /// True when this eye event is the server's TEMPORARY eye around a photo turn (the tail
+    /// markers above — matched loosely on "turn" so a rewording server-side still lands).
+    var hasPhotoTurnTail: Bool {
+        guard kind == .eyeOn || kind == .eyeOff, let tail else { return false }
+        return tail.lowercased().contains("turn")
     }
 
     /// The mode the action runs in. video.start defaults to silent (Meta's "record a video" is
@@ -146,6 +161,9 @@ protocol VoiceActionHost: AnyObject {
     /// One still: glasses POV frame if the glasses can see, else the phone camera IF its eye is
     /// open. Returns the JPEG and a short source tag ("glasses" / "phone"), nil = no camera.
     func captureStill() async -> (jpeg: Data, source: String)?
+    /// AUR-785: true when `captureStill` will try the glasses' NATIVE capture pipeline first —
+    /// whose HARDWARE shutter is the audible feedback, so the service must not add its own tick.
+    var nativeCaptureLikely: Bool { get }
     /// Start the POV recorder (glasses stream + mic [+ assistant voice]). Throws with a reason.
     func startPOVRecording() async throws
     /// Stop the POV recorder; resolves with the saved file (nil = nothing saved).
@@ -197,24 +215,52 @@ final class VoiceActionService: ObservableObject {
     private var chain: Task<Void, Never>?
     private var statusClearTask: Task<Void, Never>?
 
+    // ── AUR-785 one-shutter photo ──────────────────────────────────────────────────────────────
+    /// When the last `photo` action ARRIVED (perform-time, not run-time) — any eye event within
+    /// `photoEyeWindow` of it is treated as the server's temp eye for that photo turn even if the
+    /// `tail` tag is missing (the fallback the ticket asks for).
+    private var lastPhotoActionAt: Date?
+    private let photoEyeWindow: TimeInterval = 10.0
+    /// Temp eye.on events accepted but not yet executed. While > 0, `captureStill` must NOT close
+    /// the stream it opened for the photo — the temp eye is about to want it (no LED off/on churn,
+    /// no double stream session for one photo).
+    private var queuedTempEyeOn = 0
+    var tempEyeOpenPending: Bool { queuedTempEyeOn > 0 }
+
+    /// The server's temp eye around a photo: tagged by `tail`, or (fallback) any eye event that
+    /// arrives within ~10 s of a photo action in this session.
+    private func isTempPhotoEye(_ action: VoiceAction) -> Bool {
+        guard action.kind == .eyeOn || action.kind == .eyeOff else { return false }
+        if action.hasPhotoTurnTail { return true }
+        if let t = lastPhotoActionAt, Date().timeIntervalSince(t) < photoEyeWindow { return true }
+        return false
+    }
+
     // MARK: Perform
 
     /// Play the cue (not awaited — feedback first), then do the work, then return the ack. The
     /// caller sends the ack on the socket. Serialized with any action still in flight.
+    /// AUR-785: classification happens HERE, at arrival time — the chain may delay execution,
+    /// and the photo's `captureStill` needs to see a queued temp eye.on before it runs.
     func perform(_ action: VoiceAction) async -> VoiceActionAck {
+        if action.kind == .photo { lastPhotoActionAt = Date() }
+        let tempEye = isTempPhotoEye(action)
+        if tempEye, action.kind == .eyeOn { queuedTempEyeOn += 1 }
         let previous = chain
         let task = Task<VoiceActionAck, Never> { [weak self] in
             await previous?.value
             guard let self else {
                 return VoiceActionAck(id: action.id, action: action.kind.rawValue, ok: false, detail: "service gone", artifact: nil)
             }
-            return await self.run(action)
+            let ack = await self.run(action, tempEye: tempEye)
+            if tempEye, action.kind == .eyeOn { self.queuedTempEyeOn = max(0, self.queuedTempEyeOn - 1) }
+            return ack
         }
         chain = Task { _ = await task.value }
         return await task.value
     }
 
-    private func run(_ action: VoiceAction) async -> VoiceActionAck {
+    private func run(_ action: VoiceAction, tempEye: Bool = false) async -> VoiceActionAck {
         let t0 = Date()
         ovLog("[VoiceAction] ▶ \(action.kind.rawValue) mode=\(action.mode?.rawValue ?? "-") id=\(action.id)")
         // AUR-776b: the local phrase handler («открой камеру») may have toggled the eye a moment
@@ -230,8 +276,14 @@ final class VoiceActionService: ObservableObject {
             }
         }
         // Earcon FIRST — the whole point is Meta-speed feedback; the capture follows.
-        let engine = host?.earconEngine
-        Task { await CallEarconService.shared.play(action.kind.earcon, on: engine) }
+        // AUR-785 exceptions (one shutter per photo, Meta-style): `photo` owns its cue inside
+        // takePhoto (native capture ⇒ the glasses' hardware shutter IS the sound), and the
+        // server's temp eye around a photo turn plays NOTHING — the shutter already told the
+        // wearer everything.
+        if action.kind != .photo, !tempEye {
+            let engine = host?.earconEngine
+            Task { await CallEarconService.shared.play(action.kind.earcon, on: engine) }
+        }
 
         let ack: VoiceActionAck
         switch action.kind {
@@ -240,8 +292,8 @@ final class VoiceActionService: ObservableObject {
         case .videoStop:  ack = await stopVideo(action)
         case .audioStart: ack = await startAudio(action)
         case .audioStop:  ack = await stopAudio(action)
-        case .eyeOn:      ack = await setEye(action, open: true)
-        case .eyeOff:     ack = await setEye(action, open: false)
+        case .eyeOn:      ack = await setEye(action, open: true, quiet: tempEye)
+        case .eyeOff:     ack = await setEye(action, open: false, quiet: tempEye)
         }
         let ms = Int(Date().timeIntervalSince(t0) * 1000)
         ovLog("[VoiceAction] \(ack.ok ? "✓" : "✗") \(action.kind.rawValue) in \(ms) ms — \(ack.detail ?? "ok")\(ack.artifact?.uri.map { " → \($0.lastPathComponent)" } ?? "")")
@@ -252,9 +304,22 @@ final class VoiceActionService: ObservableObject {
 
     private func takePhoto(_ action: VoiceAction) async -> VoiceActionAck {
         guard let host else { return fail(action, "no live session") }
+        // AUR-785 one-shutter: on the native glasses pipeline the HARDWARE plays its own shutter —
+        // our tick would be a second one. So: tick upfront only when no native capture can happen
+        // (phone-camera path — instant feedback, no hardware sound); with glasses in play, tick
+        // AFTER the capture and only if the silent fallback (stream frame / phone) won.
+        let nativeLikely = host.nativeCaptureLikely
+        if !nativeLikely {
+            let engine = host.earconEngine
+            Task { await CallEarconService.shared.play(.photo, on: engine) }
+        }
         guard let still = await host.captureStill() else {
             showStatus("No camera for a photo")
             return fail(action, "no camera")
+        }
+        if nativeLikely, !still.source.hasPrefix("native") {
+            let engine = host.earconEngine
+            Task { await CallEarconService.shared.play(.photo, on: engine) }
         }
         let url = Self.capturesDirectory().appendingPathComponent("photo-\(Self.stamp()).jpg")
         do {
@@ -319,13 +384,17 @@ final class VoiceActionService: ObservableObject {
 
     // MARK: Eye (AUR-776b)
 
-    private func setEye(_ action: VoiceAction, open: Bool) async -> VoiceActionAck {
+    /// `quiet` = the server's TEMP eye around a photo turn (AUR-785): the stream still opens /
+    /// closes exactly the same, but silently — no earcon (suppressed upstream), no status flip.
+    /// The eye indicator in the action row still tracks the real state (the "subtle badge").
+    private func setEye(_ action: VoiceAction, open: Bool, quiet: Bool = false) async -> VoiceActionAck {
         guard let host else { return fail(action, "no live session") }
         let was = host.eyeState.open
         await host.setEyeOpen(open)
-        showStatus(open ? "Watching" : "Eye closed")
+        if !quiet { showStatus(open ? "Watching" : "Eye closed") }
+        let base = was == open ? "already \(open ? "on" : "off")" : (open ? "eye opened" : "eye closed")
         return VoiceActionAck(id: action.id, action: action.kind.rawValue, ok: true,
-                              detail: was == open ? "already \(open ? "on" : "off")" : (open ? "eye opened" : "eye closed"),
+                              detail: quiet ? "\(base) (photo turn, silent)" : base,
                               artifact: nil)
     }
 

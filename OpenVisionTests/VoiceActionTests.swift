@@ -32,6 +32,21 @@ final class VoiceActionTests: XCTestCase {
         XCTAssertEqual(VoiceAction(json: ["id": "9", "action": "video.start_assist", "mode": "silent"])?.mode, .silent)
     }
 
+    /// AUR-785: the server's temp-eye tail markers around a photo turn parse and classify.
+    func testPhotoTurnTailParses() {
+        let on = VoiceAction(json: ["id": "t1", "action": "eye.on", "tail": "for this turn"])
+        XCTAssertEqual(on?.tail, "for this turn")
+        XCTAssertEqual(on?.hasPhotoTurnTail, true)
+
+        let off = VoiceAction(json: ["id": "t2", "action": "eye.off", "tail": "end of the photo turn"])
+        XCTAssertEqual(off?.hasPhotoTurnTail, true)
+
+        // No tail → a real, wearer-intended eye event.
+        XCTAssertEqual(VoiceAction(json: ["id": "t3", "action": "eye.on"])?.hasPhotoTurnTail, false)
+        // A tail on a non-eye action never marks a photo turn.
+        XCTAssertEqual(VoiceAction(json: ["id": "t4", "action": "photo", "tail": "for this turn"])?.hasPhotoTurnTail, false)
+    }
+
     func testUnknownActionIsRejected() {
         XCTAssertNil(VoiceAction(json: ["id": "x", "action": "teleport"]))
         XCTAssertNil(VoiceAction(json: ["id": "x"]))
