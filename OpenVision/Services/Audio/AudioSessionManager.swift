@@ -351,6 +351,20 @@ final class AudioSessionManager {
         } else {
             voiceProcessingEnabled = false
         }
+        // AUR-772: a 0 Hz input format here means the IO unit has no mic — the previous session's
+        // VPIO unit is still being torn down, or the mic was lost with the route. An engine started
+        // in that state "runs" but the capture tap can never be installed (the second call of the
+        // evening was exactly this: hang up → Talk → deaf). Fall back to plain IO once, then fail
+        // loudly so the caller can retry instead of guessing.
+        if input.outputFormat(forBus: 0).sampleRate <= 0, voiceProcessingEnabled {
+            ovLog("[AudioSession] Input format is 0 Hz with VPIO on — retrying without voice processing")
+            try? input.setVoiceProcessingEnabled(false)
+            voiceProcessingEnabled = false
+        }
+        guard input.outputFormat(forBus: 0).sampleRate > 0 else {
+            ovLog("[AudioSession] ✗ No usable mic input (0 Hz) — route \(routeInfo.description), inputs: \(availableInputsDescription)")
+            throw AudioCaptureError.inputNodeUnavailable
+        }
         // Realize the main mixer before the first attach so the graph has a valid output format.
         _ = engine.mainMixerNode
         engine.prepare()
@@ -362,11 +376,53 @@ final class AudioSessionManager {
     }
 
     /// Tear the shared engine down (end of a realtime session).
+    ///
+    /// AUR-772: the teardown is explicit, not left to ARC. The voice-processing IO unit is
+    /// switched off and the engine reset BEFORE the reference is dropped — a VPIO unit that is
+    /// still alive when the next session creates its engine is what left the next call without a
+    /// mic (0 Hz input, "Audio input node unavailable") until the app was relaunched.
     func stopSharedEngine() {
         removeRouteObservers()
-        sharedEngine?.stop()
+        if let engine = sharedEngine {
+            if engine.isRunning { engine.stop() }
+            if voiceProcessingEnabled {
+                do { try engine.inputNode.setVoiceProcessingEnabled(false) }
+                catch { ovLog("[AudioSession] Could not disable voice processing on teardown: \(error)") }
+            }
+            engine.reset()
+            ovLog("[AudioSession] Shared engine stopped and released")
+        }
         sharedEngine = nil
         voiceProcessingEnabled = false
+    }
+
+    /// AUR-772: end the realtime rig completely — engine down, then the session deactivated with
+    /// `.notifyOthersOnDeactivation` so the HFP/VPIO IO is actually released. The next
+    /// `configure*` call reactivates with a full category/mode/options set, so stop → start is
+    /// a clean cycle rather than a reconfigure on top of a half-torn-down session.
+    func endRealtimeRig() {
+        stopSharedEngine()
+        do {
+            try audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+            currentMode = .inactive
+            ovLog("[AudioSession] Session deactivated after the realtime rig")
+        } catch {
+            // 560030580 (!act) = some IO still running (a TTS player, another engine). Not fatal:
+            // the next configure* reactivates regardless; just say so.
+            ovLog("[AudioSession] Deactivate after the realtime rig failed (IO still busy?): \(error)")
+        }
+    }
+
+    /// Microphone permission as iOS sees it right now (`AVAudioApplication`, iOS 17+).
+    var recordPermissionGranted: Bool {
+        AVAudioApplication.shared.recordPermission == .granted
+    }
+
+    /// Seconds between "rendered by the engine" and "heard": output latency + one IO buffer.
+    /// On Bluetooth HFP this is a few hundred ms — a farewell whose ring just drained is STILL in
+    /// this tail, and stopping the engine now cuts it (AUR-772).
+    var playoutTailSeconds: TimeInterval {
+        audioSession.outputLatency + audioSession.ioBufferDuration
     }
 
     // MARK: - Route observers

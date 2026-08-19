@@ -158,6 +158,10 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
     /// AUR-746: the brain said goodbye and is ending the conversation. Everything after this is
     /// expected — the socket closing is not a drop and must not start the `?resume=` backoff.
     private var sessionClosing = false
+    /// AUR-772: true when the conversation was ended by the SERVER after its spoken farewell —
+    /// the VM then skips its own "call ended" announcement (the goodbye was already heard, on
+    /// the call's route; a second one would play on whatever route is left after teardown).
+    private(set) var endedAfterFarewell = false
 
     // MARK: - Video Throttling
 
@@ -176,6 +180,7 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
         intentionalClose = false
         hasPlayedAnyReply = false
         sessionClosing = false
+        endedAfterFarewell = false
         try await openSocket(resuming: false)
         reconnectAttempt = 0
     }
@@ -723,7 +728,14 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
             while Date() < deadline, (self.playback?.pendingMs ?? 0) > 0 {
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
-            ovLog("[OpenAIRealtime] Farewell played out — ending the session (\(reason))")
+            // AUR-772: the ring being empty means RENDERED, not HEARD. On Bluetooth HFP the last
+            // few hundred ms of the goodbye are still in the output chain; tearing the engine and
+            // the route down now cut them (and the tail then surfaced from the phone speaker).
+            // Keep the session + route alive for the output latency plus a margin.
+            let tailMs = (self.playback?.playoutTailMs ?? 0) + 250
+            try? await Task.sleep(nanoseconds: UInt64(tailMs * 1_000_000))
+            ovLog("[OpenAIRealtime] Farewell played out (+\(Int(tailMs)) ms tail) — ending the session (\(reason))")
+            self.endedAfterFarewell = true
             self.closeWebSocket()
             self.connectionState = .disconnected
             self.onConnectionStateChanged?(self.connectionState)

@@ -308,6 +308,9 @@ protocol RealtimePlaybackSink: AnyObject {
     func headPlayedMs() -> (itemId: String, playedMs: Double)?
     /// Milliseconds of audio still waiting to be rendered (0 = the ear is caught up).
     var pendingMs: Double { get }
+    /// Milliseconds between "rendered" and "heard" (output chain latency) — what is still in the
+    /// ear AFTER `pendingMs` reaches 0 (AUR-772 farewell tail).
+    var playoutTailMs: Double { get }
     /// Fired on the main actor when an item has fully left the speaker.
     var onItemPlayed: ((String, Double) -> Void)? { get set }
 
@@ -618,6 +621,9 @@ final class AudioPlaybackService: ObservableObject, RealtimePlaybackSink {
 
     /// `RealtimePlaybackSink` — what is still owed to the ear (AUR-746 farewell drain).
     var pendingMs: Double { bufferedMs }
+
+    /// `RealtimePlaybackSink` — the output-chain tail that drains AFTER the ring is empty.
+    var playoutTailMs: Double { outputLatencySeconds * 1000 }
 
     // MARK: - Private
 

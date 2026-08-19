@@ -968,6 +968,15 @@ final class VoiceAgentViewModel: ObservableObject {
 
         ovLog("[VoiceAgent] Starting live video mode via \(label)...")
 
+        // AUR-772: say WHY when the mic is gone instead of failing silently three steps later
+        // ("Audio input node unavailable" with no hint). iOS can revoke it behind our back.
+        guard AudioSessionManager.shared.recordPermissionGranted else {
+            errorMessage = "Microphone access is off for OpenVision — enable it in Settings › Privacy › Microphone"
+            ttsService.speak("I can't hear you — microphone access is off. Enable it in Settings.")
+            ovLog("[VoiceAgent] ✗ Record permission not granted — not starting live mode")
+            return
+        }
+
         // Stop VoiceCommandService - the live backend will handle audio directly
         voiceCommandService.stopListening()
 
@@ -997,7 +1006,35 @@ final class VoiceAgentViewModel: ObservableObject {
         // Bring the shared engine up BEFORE connecting: whether voice-processing IO actually
         // engaged is only known once it is running, and the `?aec=` hint is decided at upgrade
         // time (AUR-724b). `startSharedEngine` is idempotent — the call further down reuses this.
-        _ = try? AudioSessionManager.shared.startSharedEngine(voiceProcessing: true)
+        // AUR-772: right after a hang-up the previous VPIO unit may still be releasing; one retry
+        // after a short settle covers that. If the engine still has no mic, stop HERE with a
+        // clear error instead of connecting a session that can never hear.
+        var engineError: Error?
+        for attempt in 1...2 {
+            do {
+                _ = try AudioSessionManager.shared.startSharedEngine(voiceProcessing: true)
+                engineError = nil
+                break
+            } catch {
+                engineError = error
+                ovLog("[VoiceAgent] Shared engine start failed (attempt \(attempt)): \(error)")
+                AudioSessionManager.shared.stopSharedEngine()
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                try? AudioSessionManager.shared.configureFullDuplex(preferGlassesMic: wantsGlassesMic)
+            }
+        }
+        if let engineError {
+            errorMessage = "Microphone unavailable: \(engineError.localizedDescription)"
+            ttsService.speak("I can't open the microphone right now. Try again in a moment.")
+            AudioSessionManager.shared.endRealtimeRig()
+            activeLiveService = nil
+            applyPreferredAudioRoute()
+            if isSessionActive || settingsManager.settings.wakeWordEnabled {
+                try? voiceCommandService.startListening()
+                if isSessionActive { voiceCommandService.enterConversationMode() }
+            }
+            return
+        }
         liveRoute = AudioSessionManager.shared.routeInfo.tag
         openAIRealtime.routeTag = liveRoute
         openAIRealtime.aecActive = AudioSessionManager.shared.clientAECActive
@@ -1215,6 +1252,10 @@ final class VoiceAgentViewModel: ObservableObject {
 
         ovLog("[VoiceAgent] Stopping live video mode...")
 
+        // AUR-772: did the SERVER end this call after speaking its goodbye? Then the wearer has
+        // already heard the conversation end, in the call's own route — no second announcement.
+        let serverSaidGoodbye = (activeLiveService as? OpenAIRealtimeService)?.endedAfterFarewell == true
+
         // Stop audio capture
         audioCapture.stopCapture()
         audioCapture.onAudioCaptured = nil
@@ -1230,7 +1271,13 @@ final class VoiceAgentViewModel: ObservableObject {
         audioPlayback.teardown()
         AudioSessionManager.shared.onEngineConfigurationChange = nil
         AudioSessionManager.shared.onRouteChange = nil
-        AudioSessionManager.shared.stopSharedEngine()
+        // Local live mode forced the phone mic (HFP dies during camera streaming) and its STT
+        // may still be running — stop it BEFORE the session is deactivated, so nothing holds IO.
+        if voiceCommandService.isListening { voiceCommandService.stopListening() }
+        // AUR-772: engine off (VPIO disabled, reset) AND the session deactivated — a clean end
+        // of the rig, so the next Talk reconfigures from scratch instead of inheriting a
+        // half-released HFP/VPIO IO (the "no mic until relaunch" symptom).
+        AudioSessionManager.shared.endRealtimeRig()
 
         // Disconnect the active live backend (Gemini or OpenAI Realtime)
         await activeLiveService?.disconnect()
@@ -1249,28 +1296,36 @@ final class VoiceAgentViewModel: ObservableObject {
         isLiveVideoMode = false
         agentState = isSessionActive ? .listening : .idle
 
-        // Local live mode forced the phone mic (HFP dies during camera streaming) and its STT
-        // may still be running — stop it so the restart below picks up the preferred route.
-        if voiceCommandService.isListening { voiceCommandService.stopListening() }
-        applyPreferredAudioRoute()
-
-        // Always restart VoiceCommandService for wake word detection
-        do {
-            try voiceCommandService.startListening()
-            if isSessionActive {
-                // Continue conversation mode if session was active
-                voiceCommandService.enterConversationMode()
-                ovLog("[VoiceAgent] Restarted voice commands in conversation mode")
-            } else {
-                // Just listen for wake word
-                ovLog("[VoiceAgent] Restarted voice commands for wake word detection")
+        // AUR-772: the mic is re-armed only when something still wants it — a live session or the
+        // wake word. With both off the capture really stops (and the orange dot goes away); the
+        // old unconditional restart kept the mic open after every call for nothing.
+        let wantsMic = isSessionActive || settingsManager.settings.wakeWordEnabled
+        if wantsMic {
+            applyPreferredAudioRoute()
+            do {
+                try voiceCommandService.startListening()
+                if isSessionActive {
+                    // Continue conversation mode if session was active
+                    voiceCommandService.enterConversationMode()
+                    ovLog("[VoiceAgent] Restarted voice commands in conversation mode")
+                } else {
+                    // Just listen for wake word
+                    ovLog("[VoiceAgent] Restarted voice commands for wake word detection")
+                }
+            } catch {
+                ovLog("[VoiceAgent] Failed to restart voice commands: \(error)")
             }
-        } catch {
-            ovLog("[VoiceAgent] Failed to restart voice commands: \(error)")
+        } else {
+            ovLog("[VoiceAgent] Mic released after live mode (no session, wake word off)")
         }
 
-        ovLog("[VoiceAgent] Live video mode stopped")
-        ttsService.speak("Live video mode ended")
+        ovLog("[VoiceAgent] Live video mode stopped (server said goodbye: \(serverSaidGoodbye))")
+        // The goodbye was spoken by the brain, in the glasses — a second "ended" on top of it
+        // (on whatever route is left after teardown) is exactly the phone-speaker tail Anton
+        // heard. Only the End pill / local paths announce.
+        if !serverSaidGoodbye {
+            ttsService.speak("Live video mode ended")
+        }
     }
 
     // MARK: - Talk mode entry (AUR-742a)
