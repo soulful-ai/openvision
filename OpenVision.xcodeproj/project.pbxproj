@@ -10,6 +10,7 @@
 		08440F1603742AB28B2B4815 /* KokoroSwift in Frameworks */ = {isa = PBXBuildFile; productRef = 1DCD8AD4861E50005E48943D /* KokoroSwift */; };
 		0CD9B9D7D0854411C0A04148 /* AIBackendProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A900F00D2451513A29BC4C6F /* AIBackendProtocol.swift */; };
 		1339DF5D7DB28F0048D95846 /* WebSearchService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44D24962AB43639AF3B59662 /* WebSearchService.swift */; };
+		16938F38C966F6D4119BA188 /* CallEarconService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17098A398E987CBB0D0A0127 /* CallEarconService.swift */; };
 		186FD72F369F1962B15EB858 /* OpenClawService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C539AB340611B1A6CCC50F17 /* OpenClawService.swift */; };
 		1D0AEF3C7A810FF410C8F2E5 /* SessionRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06B8E5499FB1BA51EF6F1741 /* SessionRecorder.swift */; };
 		1EEA4B0E379A76881244FAB9 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DE51DA812A9394A5064F60E /* SettingsView.swift */; };
@@ -120,6 +121,7 @@
 		06B8E5499FB1BA51EF6F1741 /* SessionRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRecorder.swift; sourceTree = "<group>"; };
 		09CF2D46A856380011EEC513 /* OVExceptionCatcher.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = OVExceptionCatcher.m; sourceTree = "<group>"; };
 		0E256E8AF9CAB4123C91B979 /* TranscriptBubble.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptBubble.swift; sourceTree = "<group>"; };
+		17098A398E987CBB0D0A0127 /* CallEarconService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallEarconService.swift; sourceTree = "<group>"; };
 		1ABBF4AC21A442A2C3CF6750 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		1BAC1716146D3E2731035A11 /* PhoneCameraService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneCameraService.swift; sourceTree = "<group>"; };
 		1DD518E30804BD392EEA0B34 /* wake_activation.mp3 */ = {isa = PBXFileReference; lastKnownFileType = audio.mp3; path = wake_activation.mp3; sourceTree = "<group>"; };
@@ -482,6 +484,7 @@
 				B2B78D6C28BEFF1F8426997C /* AudioCaptureService.swift */,
 				529F4C0838CFE7F8F55E28E4 /* AudioPlaybackService.swift */,
 				3DA55F18F98C8B110680989C /* AudioSessionManager.swift */,
+				17098A398E987CBB0D0A0127 /* CallEarconService.swift */,
 				CE2B8AE1E195B62D980BEA66 /* SoundService.swift */,
 			);
 			path = Audio;
@@ -779,6 +782,7 @@
 				A7A3B0467B07F116AEF20BEE /* AudioSessionManager.swift in Sources */,
 				4D19EC56086055CB93AB500D /* AureliaServerTTSService.swift in Sources */,
 				592C3761D12888A4F7E4562E /* CalendarTool.swift in Sources */,
+				16938F38C966F6D4119BA188 /* CallEarconService.swift in Sources */,
 				88419FB22964F22C4FB748C2 /* ClipboardTool.swift in Sources */,
 				3069D5D002C64029E1A09728 /* Config.swift in Sources */,
 				AF2C901CA288086B7EBA6083 /* Constants.swift in Sources */,

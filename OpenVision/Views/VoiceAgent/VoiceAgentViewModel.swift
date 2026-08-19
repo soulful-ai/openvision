@@ -562,7 +562,14 @@ final class VoiceAgentViewModel: ObservableObject {
             guard let self else { return }
             ovLog("[VoiceAgent] Wake word detected!")
             HapticFeedback.medium()
-            self.soundService.playWakeWordSound()
+            // AUR-773: when the wake word opens the realtime call, the START earcon (played in
+            // the call's own route once the rig is up) IS the "I'm listening" beep — Meta-style,
+            // ONE sound, not chime + tone. The chime stays for push-to-ask and when call sounds
+            // are off.
+            let opensCall = !self.isLiveVideoMode && !self.isSessionActive && self.canStartTalkMode
+            if !(opensCall && self.settingsManager.settings.callSoundsEnabled) {
+                self.soundService.playWakeWordSound()
+            }
 
             // If TTS is speaking, stop it immediately (interrupt)
             if self.ttsService.isSpeaking {
@@ -1041,6 +1048,12 @@ final class VoiceAgentViewModel: ObservableObject {
         applyInputGain(for: liveRoute)
         ovLog("[VoiceAgent] Live audio rig: \(liveRoute), client AEC: \(openAIRealtime.aecActive), input gain: \(audioCapture.inputGain)")
 
+        // AUR-773: the START earcon — the rig is up on the call's route (HFP when the glasses are
+        // on), so the cue rides the same stream the conversation will. Not awaited: it plays while
+        // the socket connects, so it feels instant after «Аурелия» and the session is usually up
+        // by the time it fades. Replaces the spoken "Live video mode active".
+        Task { await CallEarconService.shared.play(.callStart, on: AudioSessionManager.shared.sharedEngine) }
+
         // AUR-757: the conversation starts AUDIO-ONLY even with DAT glasses registered and
         // connected — the glasses camera is NOT started here any more (it used to be, "only when
         // they're actually there"). The eye opens later, on explicit intent, via
@@ -1144,9 +1157,7 @@ final class VoiceAgentViewModel: ObservableObject {
         watchCameraSource()
 
         ovLog("[VoiceAgent] ✓ Live video mode active - \(label) handling audio + video")
-
-        // Announce to user
-        ttsService.speak("Live video mode active")
+        // AUR-773: no spoken announcement — the START earcon above is the cue.
     }
 
     /// Resolve which live-video backend to use, or nil if none is configured.
@@ -1200,7 +1211,8 @@ final class VoiceAgentViewModel: ObservableObject {
         agentState = .liveVideo
 
         ovLog("[VoiceAgent] ✓ Local live video mode active - SmolVLM2 answering on latest frame")
-        ttsService.speak("Live video mode active, on device")
+        // AUR-773: same start cue as the realtime call (no shared rig here → private engine).
+        Task { await CallEarconService.shared.play(.callStart, on: nil) }
     }
 
     /// Answer a spoken question in local live video mode using a fresh, settled glasses frame.
@@ -1266,11 +1278,25 @@ final class VoiceAgentViewModel: ObservableObject {
         cameraRequested = false
         liveCameraSource = .none
 
-        // Stop audio playback + release the shared engine (AUR-723)
+        // Stop audio playback (AUR-723). On the End pill this cuts a reply mid-word, by design;
+        // on the server-close path the farewell has already drained (+ its playout tail).
         openAIRealtime.playback = nil
         audioPlayback.teardown()
         AudioSessionManager.shared.onEngineConfigurationChange = nil
         AudioSessionManager.shared.onRouteChange = nil
+
+        // AUR-773: the END earcon — played through the rig that is STILL up, so it is heard in the
+        // glasses, then the output-latency tail is drained before the route drops (the same lesson
+        // as the AUR-772 farewell tail: rendered ≠ heard on HFP). Order on every exit path:
+        //   server close: farewell → tail → END cue → tail → rig down
+        //   End pill / stop phrase: (reply cut) → END cue → tail → rig down
+        // Replaces the spoken "Live video mode ended" on all of them.
+        if settingsManager.settings.callSoundsEnabled {
+            await CallEarconService.shared.play(.callEnd, on: AudioSessionManager.shared.sharedEngine)
+            let tail = AudioSessionManager.shared.playoutTailSeconds + 0.1
+            try? await Task.sleep(nanoseconds: UInt64(tail * 1_000_000_000))
+        }
+
         // Local live mode forced the phone mic (HFP dies during camera streaming) and its STT
         // may still be running — stop it BEFORE the session is deactivated, so nothing holds IO.
         if voiceCommandService.isListening { voiceCommandService.stopListening() }
@@ -1320,12 +1346,9 @@ final class VoiceAgentViewModel: ObservableObject {
         }
 
         ovLog("[VoiceAgent] Live video mode stopped (server said goodbye: \(serverSaidGoodbye))")
-        // The goodbye was spoken by the brain, in the glasses — a second "ended" on top of it
-        // (on whatever route is left after teardown) is exactly the phone-speaker tail Anton
-        // heard. Only the End pill / local paths announce.
-        if !serverSaidGoodbye {
-            ttsService.speak("Live video mode ended")
-        }
+        // AUR-773: no spoken "ended" on any path — the END earcon above (played before the rig
+        // went down, in the call's route) is the cue. The brain's own goodbye precedes it on the
+        // server-close path.
     }
 
     // MARK: - Talk mode entry (AUR-742a)

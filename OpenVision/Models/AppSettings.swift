@@ -138,6 +138,10 @@ struct AppSettings: Codable, Equatable {
     /// Play activation chime on wake word detection
     var playActivationSound: Bool = true
 
+    /// AUR-773: short start/end earcons for the realtime call (the Meta-style beeps) instead of
+    /// the spoken "Live video mode active / ended". Off = the call starts and ends silently.
+    var callSoundsEnabled: Bool = true
+
     /// Conversation timeout in seconds (auto-end after silence)
     var conversationTimeout: TimeInterval = 30
 

@@ -251,8 +251,18 @@ struct VoiceSettingsView: View {
                             .foregroundColor(.secondary)
                     }
                 }
+                Toggle(isOn: $settingsManager.settings.callSoundsEnabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Call Sounds")
+                        Text("Short tone when a call starts and ends")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
             } header: {
                 Text("Feedback")
+            } footer: {
+                Text("Call sounds play in the call's own audio route (the glasses when connected): a rising tone when she starts listening, a falling one when the call ends.")
             }
 
             // Info Section
