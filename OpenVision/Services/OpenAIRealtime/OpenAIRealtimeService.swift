@@ -21,7 +21,9 @@
 //   client → server: aurelia.playback.done {item_id, played_ms} when an item finishes playing
 //                    (ends the server's play-out hold), conversation.item.truncate on every cut.
 //   aurelia.action {id, action, mode}                AUR-776: photo / video / listen — earcon + do it
-//   client → server: aurelia.action.ack {id, ok, artifact}, aurelia.action.request (UI buttons)
+//   client → server: aurelia.action.ack {id, ok, artifact}, aurelia.action.request (UI buttons),
+//                    aurelia.photo {id, mimeType, data}   AUR-787: the captured JPEG itself
+//                    (≤1280 px, q0.7) so she describes THIS shot, not a later stream frame
 //
 // Any socket drop (pod swap, Cloudflare, phone sleep) reconnects with `?resume=<session_id>` on an
 // exponential backoff, keeping the session id — the wearer hears a hiccup, not "Live mode ended"
@@ -29,6 +31,7 @@
 
 import Foundation
 import AVFoundation
+import ImageIO
 
 /// Backend-agnostic surface for the live audio + video mode. GeminiLiveService and
 /// OpenAIRealtimeService both conform, so the view layer can pick one at runtime.
@@ -704,6 +707,57 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
         var payload: [String: Any] = ["type": "aurelia.action.request", "action": kind.rawValue, "source": source]
         if let mode { payload["mode"] = mode.rawValue }
         send(payload)
+    }
+
+    /// AUR-787: ground the model's photo description in the ACTUAL captured image. The server
+    /// used to describe a later DAT stream frame — a different picture than the gallery shot.
+    /// Right after the `aurelia.action.ack` the client now uploads the very JPEG it saved:
+    ///   client → server  { type:"aurelia.photo", id, mimeType:"image/jpeg", data:<base64> }
+    /// where `id` is the photo action's id (server-initiated and button-echoed alike). The copy
+    /// is downscaled to ≤1280 px long edge at JPEG q0.7 — well under 2 MB even off the native
+    /// 4032×3024 pipeline; the full-resolution save to Photos is untouched. File read, downscale
+    /// and base64 all run OFF the main actor; a closed socket skips silently (logged).
+    func sendCapturedPhoto(id: String, fileURL: URL) {
+        guard connectionState.isUsable, webSocket != nil else {
+            ovLog("[OpenAIRealtime] aurelia.photo \(id) skipped — socket not usable")
+            return
+        }
+        Task.detached(priority: .utility) { [weak self] in
+            guard let jpeg = try? Data(contentsOf: fileURL) else {
+                ovLog("[OpenAIRealtime] aurelia.photo \(id) skipped — can't read \(fileURL.lastPathComponent)")
+                return
+            }
+            guard let scaled = Self.downscaledJPEG(jpeg, maxLongEdge: 1280, quality: 0.7) else {
+                ovLog("[OpenAIRealtime] aurelia.photo \(id) skipped — downscale failed")
+                return
+            }
+            let payload: [String: Any] = [
+                "type": "aurelia.photo",
+                "id": id,
+                "mimeType": "image/jpeg",
+                "data": scaled.base64EncodedString()
+            ]
+            ovLog("[OpenAIRealtime] aurelia.photo \(id): \(jpeg.count / 1024) KB → \(scaled.count / 1024) KB upload")
+            await self?.send(payload)
+        }
+    }
+
+    /// Downscale a JPEG to ≤`maxLongEdge` px on the long side, EXIF orientation baked in.
+    /// nonisolated static so the detached encode task never touches the main actor.
+    private nonisolated static func downscaledJPEG(_ jpeg: Data, maxLongEdge: CGFloat, quality: CGFloat) -> Data? {
+        guard let src = CGImageSourceCreateWithData(jpeg as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxLongEdge
+        ]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary) else { return nil }
+        let out = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(out, "public.jpeg" as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(dest, cg, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+        return out as Data
     }
 
     // MARK: - Barge-in execution

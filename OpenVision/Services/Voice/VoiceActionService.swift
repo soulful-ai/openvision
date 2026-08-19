@@ -7,6 +7,9 @@
 //   client → server  { type:"aurelia.action.ack", id, action, ok, detail, artifact }
 //   client → server  { type:"aurelia.action.request", action, source:"button" }  (UI taps; the
 //                    server echoes `aurelia.action` so the state is single-sourced)
+//   client → server  { type:"aurelia.photo", id, mimeType, data }  (AUR-787: after a photo ack the
+//                    ViewModel uploads the captured JPEG itself — downscaled — for grounding; see
+//                    OpenAIRealtimeService.sendCapturedPhoto)
 //
 // Actions and what they do on the phone:
 //   photo              ONE shutter, Meta-style (AUR-785): the NATIVE capture's hardware shutter

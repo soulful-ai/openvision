@@ -1134,6 +1134,13 @@ final class VoiceAgentViewModel: ObservableObject {
                     guard let self else { return }
                     let ack = await self.voiceActions.perform(action)
                     realtime?.sendActionAck(ack)
+                    // AUR-787: right after the ack, upload the captured JPEG itself so the
+                    // server grounds her description in THIS shot (any capture path — native /
+                    // stream frame / phone — lands its file in the ack artifact), not in a
+                    // later DAT stream frame. Downscale + encode run off-main in the service.
+                    if action.kind == .photo, ack.ok, let uri = ack.artifact?.uri {
+                        realtime?.sendCapturedPhoto(id: action.id, fileURL: uri)
+                    }
                 }
             }
         }
