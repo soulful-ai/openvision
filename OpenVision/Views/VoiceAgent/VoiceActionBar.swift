@@ -12,6 +12,8 @@ struct VoiceActionBar: View {
     /// mode: silent (tap) or assist (long-press).
     let onVideo: (VoiceActionMode) -> Void
     let onListen: () -> Void
+    /// AUR-776b: the canonical phrase list, on the "?" (or a long-press on the row).
+    @State private var showHelp = false
 
     var body: some View {
         HStack(spacing: 10) {
@@ -34,7 +36,18 @@ struct VoiceActionBar: View {
                        title: actions.audioRecording != nil ? "Stop" : "Listen",
                        active: actions.audioRecording != nil) { onListen() }
                 .accessibilityLabel(actions.audioRecording != nil ? "Stop listening" : "Listen and record")
+
+            Button { showHelp = true } label: {
+                Image(systemName: "questionmark.circle")
+                    .font(.subheadline)
+                    .foregroundColor(.white.opacity(0.8))
+                    .padding(6)
+                    .background(Circle().fill(Color.white.opacity(0.12)))
+            }
+            .accessibilityLabel("Voice phrases")
         }
+        .onLongPressGesture(minimumDuration: 0.6) { showHelp = true }
+        .sheet(isPresented: $showHelp) { VoicePhraseHelpSheet() }
     }
 
     private func actionPill(symbol: String, title: String, active: Bool, action: @escaping () -> Void) -> some View {
@@ -109,5 +122,53 @@ struct ActionStatusPill: View {
                 .background(Capsule().fill(.black.opacity(0.55)))
                 .transition(.opacity)
         }
+    }
+}
+
+/// AUR-776b: the canonical phrases the brain recognises (ru / en), so nobody has to guess them.
+struct VoicePhraseHelpSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    static let phrases: [(ru: String, en: String, what: String)] = [
+        ("Сделай фото", "Take a photo", "Photo"),
+        ("Запиши видео", "Record video", "Video, silent"),
+        ("Снимай и смотри", "Record and watch", "Video, assistant watching"),
+        ("Стоп видео", "Stop video", "Stop the video"),
+        ("Смотри", "Look", "Eye on"),
+        ("Не смотри", "Stop looking", "Eye off"),
+        ("Слушай", "Listen", "Listen / record audio"),
+        ("Стоп запись", "Stop recording", "Stop listening"),
+        ("Стоп", "Stop", "Stop what is running"),
+        ("Пока", "Bye", "End the conversation")
+    ]
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(Array(Self.phrases.enumerated()), id: \.offset) { _, p in
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 8) {
+                                Text("«\(p.ru)»").font(.body.bold())
+                                Text("·").foregroundColor(.secondary)
+                                Text("\"\(p.en)\"").font(.body)
+                            }
+                            Text(p.what).font(.caption).foregroundColor(.secondary)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                } header: {
+                    Text("Say it during the conversation")
+                } footer: {
+                    Text("Each action answers with a short sound. Eye on/off also works with «открой / закрой камеру».")
+                }
+            }
+            .navigationTitle("Voice phrases")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 }

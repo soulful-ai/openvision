@@ -42,6 +42,9 @@ enum VoiceActionKind: String, CaseIterable {
     case videoStop = "video.stop"
     case audioStart = "audio.start"
     case audioStop = "audio.stop"
+    /// AUR-776b: the eye (AUR-757 frame feed) by voice — «смотри» / «не смотри».
+    case eyeOn = "eye.on"
+    case eyeOff = "eye.off"
 
     /// Parse the wire value. `video.start_assist` (an early draft of the contract) maps onto
     /// video.start with mode assist — see `VoiceAction.init(json:)`.
@@ -58,6 +61,8 @@ enum VoiceActionKind: String, CaseIterable {
         case .videoStop: return .videoStop
         case .audioStart: return .audioStart
         case .audioStop: return .audioStop
+        case .eyeOn: return .eyeOn
+        case .eyeOff: return .eyeOff
         }
     }
 }
@@ -144,6 +149,8 @@ protocol VoiceActionHost: AnyObject {
     func stopPOVRecording() async -> URL?
     /// Open / leave the eye (the AUR-757 frame feed to the model) for assist-video.
     func setEyeOpen(_ open: Bool) async
+    /// Current eye intent + when it last changed (AUR-776b dedupe against the local phrase handler).
+    var eyeState: (open: Bool, changedAt: Date) { get }
     /// Mute / unmute the assistant's audio locally (silent modes).
     func setAssistantPlaybackSilenced(_ silenced: Bool)
     /// Sample rate of the PCM16 mic frames handed to `appendMicAudio` (the live capture rate).
@@ -207,6 +214,18 @@ final class VoiceActionService: ObservableObject {
     private func run(_ action: VoiceAction) async -> VoiceActionAck {
         let t0 = Date()
         ovLog("[VoiceAction] ▶ \(action.kind.rawValue) mode=\(action.mode?.rawValue ?? "-") id=\(action.id)")
+        // AUR-776b: the local phrase handler («открой камеру») may have toggled the eye a moment
+        // ago for the same utterance — then this is a duplicate: no cue, no work, a plain ack.
+        if let host, action.kind == .eyeOn || action.kind == .eyeOff {
+            let want = action.kind == .eyeOn
+            let st = host.eyeState
+            let ago = Date().timeIntervalSince(st.changedAt)
+            if st.open == want, ago < 1.0 {
+                ovLog("[VoiceAction] \(action.kind.rawValue) deduped — local toggle \(Int(ago * 1000)) ms ago")
+                return VoiceActionAck(id: action.id, action: action.kind.rawValue, ok: true,
+                                      detail: "already \(want ? "on" : "off") (local toggle \(Int(ago * 1000)) ms ago)", artifact: nil)
+            }
+        }
         // Earcon FIRST — the whole point is Meta-speed feedback; the capture follows.
         let engine = host?.earconEngine
         Task { await CallEarconService.shared.play(action.kind.earcon, on: engine) }
@@ -218,6 +237,8 @@ final class VoiceActionService: ObservableObject {
         case .videoStop:  ack = await stopVideo(action)
         case .audioStart: ack = await startAudio(action)
         case .audioStop:  ack = await stopAudio(action)
+        case .eyeOn:      ack = await setEye(action, open: true)
+        case .eyeOff:     ack = await setEye(action, open: false)
         }
         let ms = Int(Date().timeIntervalSince(t0) * 1000)
         ovLog("[VoiceAction] \(ack.ok ? "✓" : "✗") \(action.kind.rawValue) in \(ms) ms — \(ack.detail ?? "ok")\(ack.artifact?.uri.map { " → \($0.lastPathComponent)" } ?? "")")
@@ -289,6 +310,18 @@ final class VoiceActionService: ObservableObject {
         return VoiceActionAck(id: action.id, action: action.kind.rawValue, ok: url != nil,
                               detail: url != nil ? "saved to Photos" : "recorder produced no file",
                               artifact: VoiceActionArtifact(kind: .video, uri: url, durationMs: durationMs))
+    }
+
+    // MARK: Eye (AUR-776b)
+
+    private func setEye(_ action: VoiceAction, open: Bool) async -> VoiceActionAck {
+        guard let host else { return fail(action, "no live session") }
+        let was = host.eyeState.open
+        await host.setEyeOpen(open)
+        showStatus(open ? "Watching" : "Eye closed")
+        return VoiceActionAck(id: action.id, action: action.kind.rawValue, ok: true,
+                              detail: was == open ? "already \(open ? "on" : "off")" : (open ? "eye opened" : "eye closed"),
+                              artifact: nil)
     }
 
     // MARK: Audio / listen

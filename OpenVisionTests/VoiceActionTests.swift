@@ -17,6 +17,8 @@ final class VoiceActionTests: XCTestCase {
         XCTAssertEqual(VoiceAction(json: ["id": "4", "action": "audio.start"])?.kind, .audioStart)
         XCTAssertEqual(VoiceAction(json: ["id": "5", "action": "audio.stop"])?.kind, .audioStop)
         XCTAssertEqual(VoiceAction(json: ["id": "6", "action": "video.stop"])?.kind, .videoStop)
+        XCTAssertEqual(VoiceAction(json: ["id": "e1", "action": "eye.on"])?.kind, .eyeOn)
+        XCTAssertEqual(VoiceAction(json: ["id": "e2", "action": "eye.off"])?.kind, .eyeOff)
     }
 
     func testVideoStartDefaultsToSilentAndAssistAliasIsAccepted() {
@@ -62,9 +64,18 @@ final class VoiceActionTests: XCTestCase {
         XCTAssertEqual(VoiceActionKind.audioStart.earcon.label, "audio.start")
         XCTAssertEqual(VoiceActionKind.audioStop.earcon.label, "audio.stop")
         // Every cue is short (≤ 300 ms).
-        for cue: CallEarconService.Cue in [.photo, .videoStart, .videoStop, .audioStart, .audioStop] {
+        XCTAssertEqual(VoiceActionKind.eyeOn.earcon.label, "eye.on")
+        XCTAssertEqual(VoiceActionKind.eyeOff.earcon.label, "eye.off")
+        for cue: CallEarconService.Cue in [.photo, .videoStart, .videoStop, .audioStart, .audioStop, .eyeOn, .eyeOff] {
             XCTAssertLessThanOrEqual(cue.notes.reduce(0) { $0 + $1.seconds }, 0.3, cue.label)
         }
+    }
+
+    func testPhraseHelpListsTheCanonicalTen() {
+        XCTAssertEqual(VoicePhraseHelpSheet.phrases.count, 10)
+        XCTAssertEqual(VoicePhraseHelpSheet.phrases.map(\.ru),
+                       ["Сделай фото", "Запиши видео", "Снимай и смотри", "Стоп видео", "Смотри",
+                        "Не смотри", "Слушай", "Стоп запись", "Стоп", "Пока"])
     }
 
     func testRecordingBadgeClock() {

@@ -87,6 +87,9 @@ final class VoiceAgentViewModel: ObservableObject {
     /// (registered + connected → `startStreaming()`, LED on), phone camera otherwise; dismissing
     /// it stops the glasses stream (LED off) and/or the phone camera.
     @Published private(set) var cameraRequested = false
+    /// When `cameraRequested` last changed (AUR-776b: dedupe the brain's eye.on/off against a
+    /// local phrase toggle for the same utterance).
+    private(set) var cameraRequestedChangedAt: Date = .distantPast
     /// True when voice recognition is ready (audio engine running)
     @Published var isVoiceReady = false
     /// True while a POV demo recording (glasses video + mic audio) is in progress.
@@ -1498,6 +1501,7 @@ final class VoiceAgentViewModel: ObservableObject {
         guard isLiveVideoMode else { return }
         guard cameraRequested != on else { return }
         cameraRequested = on
+        cameraRequestedChangedAt = Date()
         ovLog("[VoiceAgent] Camera \(on ? "requested" : "dismissed") by the wearer (glasses available: \(glassesEyeAvailable))")
         Task { @MainActor in await updateLiveCameraSource() }
     }
@@ -2339,6 +2343,7 @@ extension VoiceAgentViewModel: VoiceActionHost {
         guard isLiveVideoMode else { return }
         if cameraRequested != open {
             cameraRequested = open
+            cameraRequestedChangedAt = Date()
             ovLog("[VoiceAgent] Camera \(open ? "requested" : "dismissed") by a voice action (glasses available: \(glassesEyeAvailable))")
         }
         await updateLiveCameraSource()
@@ -2347,4 +2352,6 @@ extension VoiceAgentViewModel: VoiceActionHost {
     func setAssistantPlaybackSilenced(_ silenced: Bool) {
         audioPlayback.silenced = silenced
     }
+
+    var eyeState: (open: Bool, changedAt: Date) { (cameraRequested, cameraRequestedChangedAt) }
 }

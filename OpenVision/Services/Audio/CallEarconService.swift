@@ -41,6 +41,10 @@ final class CallEarconService {
         case audioStart
         /// Listen / audio recording stopped: the same pair, lower (A4, A4).
         case audioStop
+        /// AUR-776b eye.on: one soft mid tone (A5, 60 ms).
+        case eyeOn
+        /// eye.off: the same, a fourth lower (E5, 60 ms).
+        case eyeOff
 
         /// (frequency Hz, duration s) per note, peak amplitude. Quiet on purpose — on HFP these
         /// land right in the ear. `hz == 0` is a rest (silence) between pulses.
@@ -53,6 +57,8 @@ final class CallEarconService {
             case .videoStop:  return [(783.99, 0.08), (659.25, 0.08), (523.25, 0.08)]
             case .audioStart: return [(587.33, 0.09), (0, 0.04), (587.33, 0.09)]
             case .audioStop:  return [(440.00, 0.09), (0, 0.04), (440.00, 0.09)]
+            case .eyeOn:      return [(880.00, 0.06)]
+            case .eyeOff:     return [(659.25, 0.06)]
             }
         }
 
@@ -63,6 +69,7 @@ final class CallEarconService {
             case .photo:     return 0.24
             case .videoStart, .videoStop: return 0.18
             case .audioStart, .audioStop: return 0.16
+            case .eyeOn, .eyeOff: return 0.15
             }
         }
 
@@ -75,6 +82,8 @@ final class CallEarconService {
             case .videoStop:  return "video.stop"
             case .audioStart: return "audio.start"
             case .audioStop:  return "audio.stop"
+            case .eyeOn:      return "eye.on"
+            case .eyeOff:     return "eye.off"
             }
         }
     }
