@@ -9,8 +9,11 @@
 //                    server echoes `aurelia.action` so the state is single-sourced)
 //
 // Actions and what they do on the phone:
-//   photo              earcon → one still from the glasses POV stream (fresh frame; the DAT one-shot
-//                      capturePhoto times out on this SDK) → Photos + Documents/Captures/*.jpg.
+//   photo              earcon → NATIVE glasses capture first (AUR-783: the glasses' own photo
+//                      pipeline via captureNativePhoto — the AUR-776 "timeout" was a request sent
+//                      before the stream was really live, silently dropped by the SDK), falling
+//                      back to a fresh 720p frame off the POV stream → Photos +
+//                      Documents/Captures/*.jpg. The ack detail names the path + pixel size.
 //                      Glasses not there → the phone camera frame IF the eye is open, else ok:false.
 //   video.start        earcon → SessionRecorder (glasses POV via AVAssetWriter + mic, + the
 //                      assistant's voice in assist mode) → Photos on stop. mode:
@@ -261,8 +264,10 @@ final class VoiceActionService: ObservableObject {
         }
         let saved = await Self.saveToPhotos(url, isVideo: false)
         showStatus(saved ? "Photo saved" : "Photo kept in the app (Photos access off)")
+        // AUR-783: `source` says which path won — "native 4032×3024" (the glasses' own photo
+        // pipeline) vs "stream frame 720×1280" (the fallback grab) vs "phone".
         return VoiceActionAck(id: action.id, action: action.kind.rawValue, ok: true,
-                              detail: "\(still.source) frame\(saved ? ", saved to Photos" : ", app docs only")",
+                              detail: "\(still.source)\(saved ? ", saved to Photos" : ", app docs only")",
                               artifact: VoiceActionArtifact(kind: .photo, uri: url, durationMs: nil))
     }
 

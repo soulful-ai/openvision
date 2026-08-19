@@ -69,3 +69,7 @@ fabric.properties
 
 # Claude Code
 .claude/
+
+# Local xcodebuild DerivedData (the sideload rail builds with -derivedDataPath .dd / .dd-sim)
+.dd/
+.dd-sim/

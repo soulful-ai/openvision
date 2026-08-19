@@ -311,10 +311,11 @@ final class SessionRecorder: ObservableObject {
             AVVideoWidthKey: width,
             AVVideoHeightKey: height,
             // Explicit bitrate: the default is stingy for a moving handheld/head-mounted POV.
-            // ~4 Mbps at 504×896 keeps encode artifacts out of the quality budget (the BT stream
-            // itself is the ceiling).
+            // Scaled by pixel count so the AUR-783 720×1280 stream gets ~8 Mbps where the old
+            // 504×896 got ~4 — keeps encode artifacts out of the quality budget (the glasses
+            // stream itself is the ceiling).
             AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: 4_000_000,
+                AVVideoAverageBitRateKey: max(4_000_000, width * height * 9),
                 AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
             ]
         ]

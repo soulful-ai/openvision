@@ -1902,10 +1902,11 @@ final class VoiceAgentViewModel: ObservableObject {
             startedStreamingForPhoto = true
         }
 
-        // Capture straight from the live video stream. The glasses' one-shot photo API
-        // (session.capturePhoto) doesn't reliably deliver on this model/SDK — it times out
-        // after 5s — whereas a live frame is available immediately. freshLiveFrame() ensures
-        // the stream is running, waits for a fresh frame, and restarts a stalled stream.
+        // Capture straight from the live video stream — this frame goes to the MODEL (vision
+        // prompt), where 720p is plenty and latency matters more than pixels; the native
+        // full-res path (captureNativePhoto, AUR-783) is reserved for the `photo` action that
+        // saves to the library. freshLiveFrame() ensures the stream is running, waits for a
+        // fresh frame, and restarts a stalled stream.
         imageData = await freshLiveFrame()
 
         NSLog("[OV] captureAndSendPhoto result: %@ (streaming=%@, registered=%@)",
@@ -2307,28 +2308,44 @@ extension VoiceAgentViewModel: VoiceActionHost {
 
     var micSampleRate: Double { audioCapture.targetSampleRate }
 
-    /// One still for `photo`. Glasses POV first (a FRESH frame off the DAT stream — the SDK's
-    /// one-shot `capturePhoto` times out on this model, the stream frame is immediate); the
-    /// phone camera's last frame when its eye is open; nil otherwise. Click-and-go: a stream
-    /// opened only for the photo is closed again (LED off) unless the eye or a recording wants it.
+    /// One still for `photo`. Glasses first, best quality first (AUR-783):
+    ///   1. NATIVE capture — the glasses' own photo pipeline via `captureNativePhoto` (the Meta-AI
+    ///      quality still). The AUR-776 timeout is fixed at the root: the SDK silently drops the
+    ///      request until the stream state is really `.streaming`, so we wait for that, then give
+    ///      it a generous 10 s (the shutter earcon already confirmed receipt — latency is fine).
+    ///   2. Fresh 720p frame off the DAT stream when native times out / is refused.
+    ///   3. The phone camera's last frame when its eye is open; nil otherwise.
+    /// Click-and-go: a stream opened only for the photo is closed again (LED off) unless the eye
+    /// or a recording wants it.
     func captureStill() async -> (jpeg: Data, source: String)? {
         if glassesEyeAvailable {
             let wasStreaming = glassesManager.isStreaming
-            if let jpeg = await freshLiveFrame() {
-                if !wasStreaming, !cameraRequested, !isRecording, glassesManager.isStreaming {
-                    await glassesManager.stopStreaming()
-                }
-                return (jpeg, "glasses")
+            if !wasStreaming { await glassesManager.startStreaming() }
+            var still: (jpeg: Data, source: String)?
+            if let native = await glassesManager.captureNativePhoto(timeout: 10.0) {
+                still = (native, "native\(Self.pixelTag(native))")
+            } else if let jpeg = await freshLiveFrame() {
+                still = (jpeg, "stream frame\(Self.pixelTag(jpeg))")
             }
             if !wasStreaming, !cameraRequested, !isRecording, glassesManager.isStreaming {
                 await glassesManager.stopStreaming()
             }
+            if let still { return still }
         }
         if phoneCamera.isRunning, let frame = phoneCamera.lastFrame,
            let jpeg = frame.jpegData(compressionQuality: 0.85) {
             return (jpeg, "phone")
         }
         return nil
+    }
+
+    /// " 4032×3024"-style suffix for the photo ack detail — the honest answer to "which path
+    /// did this photo take" (native full-res vs 720p stream frame). Empty if undecodable.
+    private static func pixelTag(_ jpeg: Data) -> String {
+        guard let image = UIImage(data: jpeg) else { return "" }
+        let w = Int(image.size.width * image.scale)
+        let h = Int(image.size.height * image.scale)
+        return w > 0 && h > 0 ? " \(w)×\(h)" : ""
     }
 
     func startPOVRecording() async throws {
