@@ -2330,15 +2330,20 @@ extension VoiceAgentViewModel: VoiceActionHost {
     /// or a recording wants it — or a temp eye.on for THIS photo turn is already queued (AUR-785:
     /// the server temp-opens the eye right after `photo`; closing the stream here would be an
     /// LED off→on flap and a second stream session for one photo).
-    func captureStill() async -> (jpeg: Data, source: String)? {
+    func captureStill() async -> (jpeg: Data, source: String, reference: UIImage?)? {
         if glassesEyeAvailable {
             let wasStreaming = glassesManager.isStreaming
             if !wasStreaming { await glassesManager.startStreaming() }
-            var still: (jpeg: Data, source: String)?
+            var still: (jpeg: Data, source: String, reference: UIImage?)?
             if let native = await glassesManager.captureNativePhoto(timeout: 10.0) {
-                still = (native, "native\(Self.pixelTag(native))")
+                // AUR-789: the freshest live-stream frame (same scene, consistently upright —
+                // the native capture pauses the stream, so lastFrame is from just before the
+                // shutter) rides along as the orientation normalizer's upright reference.
+                let fresh = Date().timeIntervalSince(glassesManager.lastFrameTime) < 10.0
+                still = (native, "native\(Self.pixelTag(native))",
+                         fresh ? glassesManager.lastFrame : nil)
             } else if let jpeg = await freshLiveFrame() {
-                still = (jpeg, "stream frame\(Self.pixelTag(jpeg))")
+                still = (jpeg, "stream frame\(Self.pixelTag(jpeg))", nil)
             }
             if !wasStreaming, !cameraRequested, !isRecording, !voiceActions.tempEyeOpenPending,
                glassesManager.isStreaming {
@@ -2348,7 +2353,7 @@ extension VoiceAgentViewModel: VoiceActionHost {
         }
         if phoneCamera.isRunning, let frame = phoneCamera.lastFrame,
            let jpeg = frame.jpegData(compressionQuality: 0.85) {
-            return (jpeg, "phone")
+            return (jpeg, "phone", nil)
         }
         return nil
     }

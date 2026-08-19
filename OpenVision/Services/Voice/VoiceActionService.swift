@@ -38,7 +38,9 @@
 // ViewModel — so this file stays free of session orchestration and is testable.
 
 import AVFoundation
+import CoreImage
 import Foundation
+import ImageIO
 import Photos
 import UIKit
 
@@ -162,8 +164,10 @@ protocol VoiceActionHost: AnyObject {
     /// The live rig's engine, so the earcons ride the call's route (HFP in the glasses).
     var earconEngine: AVAudioEngine? { get }
     /// One still: glasses POV frame if the glasses can see, else the phone camera IF its eye is
-    /// open. Returns the JPEG and a short source tag ("glasses" / "phone"), nil = no camera.
-    func captureStill() async -> (jpeg: Data, source: String)?
+    /// open. Returns the JPEG, a short source tag ("glasses" / "phone"), and — AUR-789 — an
+    /// optional upright REFERENCE frame (a fresh live-stream frame of the same scene) for the
+    /// orientation normalizer's tie-break. nil = no camera.
+    func captureStill() async -> (jpeg: Data, source: String, reference: UIImage?)?
     /// AUR-785: true when `captureStill` will try the glasses' NATIVE capture pipeline first —
     /// whose HARDWARE shutter is the audible feedback, so the service must not add its own tick.
     var nativeCaptureLikely: Bool { get }
@@ -324,9 +328,13 @@ final class VoiceActionService: ObservableObject {
             let engine = host.earconEngine
             Task { await CallEarconService.shared.play(.photo, on: engine) }
         }
+        // AUR-789: normalize orientation BEFORE the write — the Photos save AND the grounding
+        // upload (sendCapturedPhoto reads this very file) both get the upright pixels.
+        let upright = Self.normalizedUprightJPEG(still.jpeg, source: still.source,
+                                                 reference: still.reference)
         let url = Self.capturesDirectory().appendingPathComponent("photo-\(Self.stamp()).jpg")
         do {
-            try still.jpeg.write(to: url, options: .atomic)
+            try upright.write(to: url, options: .atomic)
         } catch {
             return fail(action, "write failed: \(error.localizedDescription)")
         }
@@ -492,6 +500,129 @@ final class VoiceActionService: ObservableObject {
         return f.string(from: Date())
     }
 
+    // MARK: - Photo orientation (AUR-789)
+
+    /// AUR-789 manual override for NATIVE glasses photos, settable WITHOUT a rebuild via
+    /// UserDefaults key "GlassesNativeRotation":
+    ///   "auto" (default) — trust EXIF, with the stream-frame NCC tie-break (see the normalizer)
+    ///   "cw" | "ccw" | "180" — FORCE that rotation of the stored pixels, ignore EXIF
+    ///   "none" — force no rotation (stored pixels are upright), ignore EXIF
+    /// Field data 2026-08-19 (10 shots off Anton's phone): the DAT native pipeline stamps
+    /// EXIF orientation 6 on EVERY 1440×1080 native JPEG, but the stored pixels are
+    /// INCONSISTENT — 6 of 8 were sensor-rotated (tag correct → upright portrait), 2 of 8
+    /// (both landscape street scenes) were stored already upright, so honoring the tag turned
+    /// them sideways in the gallery. No metadata differentiates the two cases — hence "auto".
+    static var glassesNativeRotationOverride: CGImagePropertyOrientation? {
+        switch UserDefaults.standard.string(forKey: "GlassesNativeRotation") {
+        case "cw": return .right
+        case "ccw": return .left
+        case "180": return .down
+        case "none": return .up
+        default: return nil   // "auto"
+        }
+    }
+
+    /// Shared CIContext for the orientation bake (context creation is the expensive part).
+    private static let orientationBakeContext = CIContext()
+
+    /// AUR-789: every captured photo passes through here BEFORE the Captures write (and thus
+    /// before the Photos save and the aurelia.photo grounding upload, which re-reads that file).
+    /// Decode → inspect EXIF/CGImagePropertyOrientation and the pixels → return an UPRIGHT JPEG
+    /// with the rotation baked into the pixels and NO orientation tag left for a consumer to
+    /// mis-handle. Decision, per the 2026-08-19 field data (see `glassesNativeRotationOverride`):
+    ///   • native + override set → apply exactly the override to the stored pixels.
+    ///   • native + EXIF says rotate + a fresh stream frame available → NCC tie-break: compare
+    ///     32×32 grayscale center squares of (stored pixels) vs (EXIF-applied pixels) against
+    ///     the upright stream frame of the same scene; a ≥0.10 correlation margin decides,
+    ///     otherwise trust EXIF. (Validated 8/8 on the field photos, incl. FOV perturbation.)
+    ///   • anything else → trust EXIF when present, else leave as stored.
+    /// A wrong-tag photo that needs NO rotation is still re-encoded to STRIP the tag.
+    /// Always logs one line: `photo orientation {exif, applied, size}`.
+    static func normalizedUprightJPEG(_ jpeg: Data, source: String, reference: UIImage?) -> Data {
+        guard let src = CGImageSourceCreateWithData(jpeg as CFData, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else {
+            ovLog("[VoiceAction] photo orientation {exif:undecodable, applied:none, size:?×? (\(source))}")
+            return jpeg
+        }
+        let w = (props[kCGImagePropertyPixelWidth] as? Int) ?? 0
+        let h = (props[kCGImagePropertyPixelHeight] as? Int) ?? 0
+        let exifRaw = props[kCGImagePropertyOrientation] as? UInt32
+        let exif = exifRaw.flatMap { CGImagePropertyOrientation(rawValue: $0) } ?? .up
+        let exifDesc = exifRaw.map { "\($0)" } ?? "none"
+        let isNative = source.hasPrefix("native")
+
+        var applied = exif
+        var how = "exif"
+        if isNative, let forced = glassesNativeRotationOverride {
+            applied = forced
+            how = "override"
+        } else if isNative, exif != .up, let cg = CGImageSourceCreateImageAtIndex(src, 0, nil),
+                  let refCG = reference?.cgImage,
+                  let refV = tinyGray(CIImage(cgImage: refCG)),
+                  let tagV = tinyGray(CIImage(cgImage: cg).oriented(exif)),
+                  let storedV = tinyGray(CIImage(cgImage: cg)) {
+            let cTag = zip(refV, tagV).reduce(Float(0)) { $0 + $1.0 * $1.1 }
+            let cStored = zip(refV, storedV).reduce(Float(0)) { $0 + $1.0 * $1.1 }
+            if cStored > cTag + 0.10 {
+                applied = .up      // stored pixels already upright — the tag lies
+                how = String(format: "ncc stored %.2f>tag %.2f", cStored, cTag)
+            } else {
+                how = String(format: "ncc tag %.2f≥stored %.2f", cTag, cStored)
+            }
+        }
+
+        let tagNeedsStrip = exifRaw != nil && exifRaw != 1
+        if applied == .up && !tagNeedsStrip {
+            ovLog("[VoiceAction] photo orientation {exif:\(exifDesc), applied:none [\(how)], size:\(w)×\(h) (\(source))}")
+            return jpeg
+        }
+        guard let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
+            ovLog("[VoiceAction] photo orientation {exif:\(exifDesc), applied:FAILED-decode, size:\(w)×\(h) (\(source))}")
+            return jpeg
+        }
+        let uprightImage = CIImage(cgImage: cg).oriented(applied)
+        let colorSpace = cg.colorSpace.flatMap { $0.model == .rgb ? $0 : nil }
+            ?? CGColorSpace(name: CGColorSpace.sRGB)!
+        let quality = CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String)
+        guard let baked = orientationBakeContext.jpegRepresentation(
+            of: uprightImage, colorSpace: colorSpace, options: [quality: 0.9]) else {
+            ovLog("[VoiceAction] photo orientation {exif:\(exifDesc), applied:FAILED(\(applied.logName)), size:\(w)×\(h) (\(source))}")
+            return jpeg
+        }
+        let swapped = [CGImagePropertyOrientation.left, .right, .leftMirrored, .rightMirrored].contains(applied)
+        let (ow, oh) = swapped ? (h, w) : (w, h)
+        ovLog("[VoiceAction] photo orientation {exif:\(exifDesc), applied:\(applied.logName) [\(how)], size:\(w)×\(h)→\(ow)×\(oh) (\(source))}")
+        return baked
+    }
+
+    /// 32×32 zero-mean unit-norm grayscale of the image's center square — the NCC feature.
+    /// Everything goes through the same render path, so any common flip cancels out in the
+    /// comparison. Returns nil when the render fails (→ caller falls back to EXIF).
+    private static func tinyGray(_ image: CIImage, n: Int = 32) -> [Float]? {
+        let ext = image.extent
+        guard ext.width > 1, ext.height > 1 else { return nil }
+        let side = min(ext.width, ext.height)
+        let cropped = image.cropped(to: CGRect(x: ext.midX - side / 2, y: ext.midY - side / 2,
+                                               width: side, height: side))
+        let scale = CGFloat(n) / side
+        var tiny = cropped.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        tiny = tiny.transformed(by: CGAffineTransform(translationX: -tiny.extent.origin.x,
+                                                      y: -tiny.extent.origin.y))
+        var px = [UInt8](repeating: 0, count: n * n * 4)
+        orientationBakeContext.render(tiny, toBitmap: &px, rowBytes: n * 4,
+                                      bounds: CGRect(x: 0, y: 0, width: n, height: n),
+                                      format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB())
+        var g = [Float](repeating: 0, count: n * n)
+        for i in 0..<(n * n) {
+            g[i] = 0.299 * Float(px[i * 4]) + 0.587 * Float(px[i * 4 + 1]) + 0.114 * Float(px[i * 4 + 2])
+        }
+        let mean = g.reduce(0, +) / Float(g.count)
+        for i in g.indices { g[i] -= mean }
+        let norm = g.reduce(Float(0)) { $0 + $1 * $1 }.squareRoot()
+        guard norm > 0 else { return nil }
+        return g.map { $0 / norm }
+    }
+
     /// Add a file to the Photos library (add-only access). False = not added (permission off or
     /// failure) — the file still lives in the app's Captures folder.
     static func saveToPhotos(_ url: URL, isVideo: Bool) async -> Bool {
@@ -615,5 +746,24 @@ final class MicBackupWriter: @unchecked Sendable {
                                         sampleBufferOut: &sample) == noErr else { return nil }
         frames += Int64(frameCount)
         return sample
+    }
+}
+
+// MARK: - AUR-789 orientation logging
+
+extension CGImagePropertyOrientation {
+    /// Human-readable name for the `photo orientation` log line.
+    var logName: String {
+        switch self {
+        case .up: return "none"
+        case .upMirrored: return "flipH"
+        case .down: return "180"
+        case .downMirrored: return "flipV"
+        case .left: return "90CCW"
+        case .leftMirrored: return "90CCW+flip"
+        case .right: return "90CW"
+        case .rightMirrored: return "90CW+flip"
+        @unknown default: return "raw\(rawValue)"
+        }
     }
 }
