@@ -30,7 +30,7 @@ struct ReminderTool: NativeTool {
         } else {
             granted = (try? await store.requestAccess(to: .reminder)) ?? false
         }
-        guard granted else { return "I need Reminders access — enable it in Settings, then ask again." }
+        guard granted else { throw NativeToolError.permissionRequired(kind: "reminders") }   // AUR-792
 
         let reminder = EKReminder(eventStore: store)
         reminder.title = title

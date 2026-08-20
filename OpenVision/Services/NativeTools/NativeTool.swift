@@ -42,12 +42,50 @@ extension NativeTool {
     }
 }
 
+/// Typed failures a tool can throw so EVERY caller can react by kind, not by string (AUR-792):
+/// the push-to-ask registry turns them into the same spoken sentences as before, the realtime
+/// client-tool bridge maps them to wire codes (`permission_required:<kind>`, `not_linked:<service>`)
+/// so the brain can explain and the Connections UI (AUR-795) can offer the fix.
+enum NativeToolError: LocalizedError, Equatable {
+    /// The OS permission the tool needs is missing. `kind`: "calendar" | "reminders" | "notifications" | …
+    case permissionRequired(kind: String)
+    /// An integration the tool needs is not linked yet. `service`: "spotify" | …
+    case notLinked(service: String)
+
+    /// The short code that crosses the realtime wire (`aurelia.tool_result.error`).
+    var wireCode: String {
+        switch self {
+        case .permissionRequired(let kind): return "permission_required:\(kind)"
+        case .notLinked(let service): return "not_linked:\(service)"
+        }
+    }
+
+    /// Spoken-friendly sentence for the legacy (push-to-ask) path, where the tool's string IS the
+    /// model's input — keeps those replies exactly as they were before the typed error existed.
+    var errorDescription: String? {
+        switch self {
+        case .permissionRequired(let kind):
+            switch kind {
+            case "calendar": return "I need Calendar access — enable it in Settings, then ask again."
+            case "reminders": return "I need Reminders access — enable it in Settings, then ask again."
+            case "notifications": return "Notifications are off, so I can't alert you. Enable them in Settings."
+            default: return "I need \(kind) access — enable it in Settings, then ask again."
+            }
+        case .notLinked(let service):
+            return "\(service.capitalized) isn't linked yet — connect it in Settings, then ask again."
+        }
+    }
+}
+
 /// Central registry of the available native tools. Read-only after init, so it's safe to read from
 /// any thread (the backend's request loop runs off the main thread).
 final class NativeToolRegistry {
     static let shared = NativeToolRegistry()
 
     private let tools: [String: NativeTool]
+    /// Declaration order — what the realtime client-tool bridge (AUR-792) advertises, stable
+    /// across launches so the manifest the brain sees never reshuffles.
+    let allTools: [NativeTool]
 
     private init() {
         let all: [NativeTool] = [
@@ -62,6 +100,7 @@ final class NativeToolRegistry {
         var map: [String: NativeTool] = [:]
         for t in all { map[t.name] = t }
         tools = map
+        allTools = all
     }
 
     /// Tool specs to advertise to the model.
@@ -94,6 +133,10 @@ final class NativeToolRegistry {
             let result = try await tool.execute(args: args)
             NSLog("[NativeTool] ✔ %@", name)
             return result
+        } catch let typed as NativeToolError {
+            // Permission / link failures keep their spoken sentence (the model reads it out).
+            NSLog("[NativeTool] ✘ %@ → %@", name, typed.wireCode)
+            return typed.errorDescription ?? "That didn't work."
         } catch {
             NSLog("[NativeTool] ✘ %@ failed: %@", name, "\(error)")
             return "That didn't work: \(error.localizedDescription)"

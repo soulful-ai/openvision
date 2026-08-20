@@ -18,7 +18,7 @@ struct PomodoroTool: NativeTool {
         let work = max(1, min(120, NativeToolSupport.int(args["work_minutes"]) ?? 25))
         let brk = max(1, min(60, NativeToolSupport.int(args["break_minutes"]) ?? 5))
         guard await NativeToolSupport.ensureNotificationAuth() else {
-            return "I couldn't start the Pomodoro because notifications are off. Enable them in Settings."
+            throw NativeToolError.permissionRequired(kind: "notifications")   // AUR-792
         }
         let center = UNUserNotificationCenter.current()
         try await center.add(Self.request(after: work * 60, title: "Focus done", body: "Take a \(brk)-minute break."))

@@ -24,6 +24,9 @@
 //   client → server: aurelia.action.ack {id, ok, artifact}, aurelia.action.request (UI buttons),
 //                    aurelia.photo {id, mimeType, data}   AUR-787: the captured JPEG itself
 //                    (≤1280 px, q0.7) so she describes THIS shot, not a later stream frame
+//   aurelia.client_tools / aurelia.tool_call / aurelia.tool_result   AUR-792: the phone's native
+//                    tools (timer, reminder, calendar, …) advertised after every (re)connect and
+//                    executed on request — see ClientToolBridge.
 //
 // Any socket drop (pod swap, Cloudflare, phone sleep) reconnects with `?resume=<session_id>` on an
 // exponential backoff, keeping the session id — the wearer hears a hiccup, not "Live mode ended"
@@ -102,6 +105,12 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
 
     /// Route tag reported to the brain in `session.update.metadata.route` ("a2dp+phone-mic", …).
     var routeTag: String = "unknown"
+
+    /// AUR-792: the phone's native tools on the wire. Advertised (`aurelia.client_tools`) right
+    /// after each (re)connect's session.update, re-advertised when a permission state changes,
+    /// and answers `aurelia.tool_call` → `aurelia.tool_result`. Shares `NativeToolRegistry` with
+    /// the banked push-to-ask path; idle unless the session is open.
+    let clientTools: ClientToolBridge
 
     /// AUR-724b: "this client cancels its own echo" (iOS VPIO). The brain drops its echo-level
     /// gate when this is true and leans on text-based self-echo rejection instead, which makes
@@ -187,7 +196,10 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
 
     // MARK: - Initialization
 
-    private init() {}
+    private init() {
+        clientTools = ClientToolBridge(tools: NativeToolRegistry.shared.allTools)
+        clientTools.send = { [weak self] payload in self?.send(payload) }
+    }
 
     // MARK: - Connection
 
@@ -264,6 +276,10 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
             connectionState = .connected
             onConnectionStateChanged?(connectionState)
             startPinging()
+            // AUR-792: the session.update went out on `session.created`; the tool manifest is
+            // the next thing on the wire — before any audio, so the very first turn can already
+            // set a timer. Re-sent on every resume (the server's session may have forgotten it).
+            clientTools.sessionDidConnect()
             flushPreRoll()        // AUR-743: what followed the wake word, first
             flushOfflineAudio()   // then what the mic heard while we were connecting / down
             ovLog("[OpenAIRealtime] Connected socket #\(generation) (session \(sessionId ?? "?"), resumed: \(resuming), route \(routeTag))")
@@ -331,6 +347,8 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
         webSocket = nil
         urlSession?.invalidateAndCancel()
         urlSession = nil
+        // AUR-792: nothing in flight can be answered on a closed socket.
+        clientTools.sessionDidDisconnect()
         isSessionReady = false
         isModelSpeaking = false
         isProcessing = false
@@ -656,6 +674,10 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
                 ovLog("[OpenAIRealtime] Unknown aurelia.action \"\(raw)\" — nacking")
                 sendActionAck(VoiceActionAck(id: id, action: raw, ok: false, detail: "unknown action", artifact: nil))
             }
+
+        // ── AUR-792: the brain wants the phone to do something (timer / reminder / calendar…) ─
+        case "aurelia.tool_call":
+            clientTools.handleToolCall(json)
 
         // ── AUR-742 client half of the heavy lane (memo §1.6): log + count the tasks ──────────
         case "aurelia.task.started", "aurelia.task.queued":

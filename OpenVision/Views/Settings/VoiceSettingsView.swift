@@ -315,6 +315,9 @@ struct VoiceSettingsView: View {
                             .foregroundColor(.secondary)
                     }
                 }
+                // AUR-792: what the realtime session advertises to the brain (read-only here;
+                // the Connections screen is AUR-795).
+                PhoneToolsDebugRows()
             } header: {
                 Text("Debug")
             } footer: {
@@ -346,6 +349,72 @@ struct VoiceSettingsView: View {
             "«Сделай фото» · «Смотри» · «Слушай» — fast actions inside the call",
             "«Пока» / \"bye\" — ends the call; so does the silence timeout above"
         ]
+    }
+}
+
+// MARK: - Phone tools (AUR-792 read-out)
+
+/// "Phone tools: N available" + the per-kind permission state the realtime bridge sends in
+/// `aurelia.client_tools.connections`. Live read on appear and on every return to the foreground
+/// (the same moment the bridge re-checks), so what is shown IS what the brain was told.
+private struct PhoneToolsDebugRows: View {
+    @State private var connections: PhoneConnections?
+    @State private var expanded = false
+
+    private var bridge: ClientToolBridge { OpenAIRealtimeService.shared.clientTools }
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            ForEach(bridge.toolNames, id: \.self) { name in
+                Text(name)
+                    .font(.caption.monospaced())
+                    .foregroundColor(.secondary)
+            }
+            ForEach(rows, id: \.kind) { row in
+                HStack {
+                    Text(row.kind)
+                    Spacer()
+                    Text(row.state)
+                        .foregroundColor(color(for: row.state))
+                }
+                .font(.caption)
+            }
+            HStack {
+                Text("Last sent to the brain")
+                Spacer()
+                Text(lastSent)
+                    .foregroundColor(.secondary)
+            }
+            .font(.caption)
+        } label: {
+            HStack {
+                Label("Phone tools", systemImage: "iphone.radiowaves.left.and.right")
+                Spacer()
+                Text("\(bridge.toolNames.count) available")
+                    .foregroundColor(.secondary)
+            }
+        }
+        .task { connections = await PhoneConnections.current() }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            Task { connections = await PhoneConnections.current() }
+        }
+    }
+
+    private var rows: [(kind: String, state: String)] {
+        (connections ?? bridge.lastSentConnections ?? PhoneConnections()).rows
+    }
+
+    private var lastSent: String {
+        guard let at = bridge.lastManifestSentAt else { return "not yet (no live session)" }
+        return at.formatted(date: .omitted, time: .standard)
+    }
+
+    private func color(for state: String) -> Color {
+        switch state {
+        case "granted", "linked": return .green
+        case "denied": return .orange
+        default: return .secondary
+        }
     }
 }
 

@@ -20,7 +20,7 @@ struct TimerTool: NativeTool {
         guard seconds > 0, seconds <= 86400 else { return "A timer needs a duration between 1 second and 24 hours." }
         let label = args["label"] as? String
         guard await NativeToolSupport.ensureNotificationAuth() else {
-            return "Timer noted, but notifications are off, so I can't alert you. Enable them in Settings."
+            throw NativeToolError.permissionRequired(kind: "notifications")   // AUR-792
         }
         let content = UNMutableNotificationContent()
         content.title = label.map { "\($0.capitalized) timer" } ?? "Timer"

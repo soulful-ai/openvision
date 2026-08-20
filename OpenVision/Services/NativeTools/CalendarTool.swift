@@ -30,7 +30,9 @@ struct CalendarTool: NativeTool {
         } else {
             granted = (try? await store.requestAccess(to: .event)) ?? false
         }
-        guard granted else { return "I need Calendar access — enable it in Settings, then ask again." }
+        // AUR-792: typed, so the realtime bridge answers `permission_required:calendar` and the
+        // brain explains; the push-to-ask registry still speaks the same sentence as before.
+        guard granted else { throw NativeToolError.permissionRequired(kind: "calendar") }
 
         if action == "add" {
             guard let title = (args["title"] as? String)?.trimmingCharacters(in: .whitespaces), !title.isEmpty else {
