@@ -73,3 +73,6 @@ fabric.properties
 # Local xcodebuild DerivedData (the sideload rail builds with -derivedDataPath .dd / .dd-sim)
 .dd/
 .dd-sim/
+
+# OTA rail (AUR-818): archive/export/signed-link artefacts
+.ota/
