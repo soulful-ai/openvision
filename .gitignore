@@ -76,3 +76,4 @@ fabric.properties
 
 # OTA rail (AUR-818): archive/export/signed-link artefacts
 .ota/
+.build-logs/

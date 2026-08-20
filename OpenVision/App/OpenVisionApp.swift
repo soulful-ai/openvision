@@ -29,6 +29,10 @@ struct OpenVisionApp: App {
         // then re-downloaded ~GBs at "connecting…" time). Must run before any HubClient exists.
         GemmaLocalService.bootstrapModelStore()
 
+        // AUR-823: reattach the background upload session so a listen-backup upload that
+        // finished while we were suspended still lands its result in Captures/index.json.
+        ListenBackupUploader.shared.reattachBackgroundSession()
+
         // Initialize Meta Wearables SDK
         do {
             try Wearables.configure()

@@ -217,6 +217,12 @@ final class VoiceActionService: ObservableObject {
     var isRecordingAnything: Bool { videoRecording != nil || audioRecording != nil }
 
     private var micBackup: MicBackupWriter?
+    /// AUR-823: where a finished listen backup goes (file, startedAt, durationMs) — the uploader
+    /// indexes it and auto-uploads ≥ 60 s backups for server re-transcription. Injectable so
+    /// the service stays testable without a network.
+    var listenBackupSink: (URL, Date, Int) -> Void = { url, startedAt, durationMs in
+        ListenBackupUploader.shared.registerAndAutoUpload(fileURL: url, startedAt: startedAt, durationMs: durationMs)
+    }
     /// Actions run strictly one after another — a "stop" that arrives while a "start" is still
     /// opening the glasses stream must see the started state, not race it.
     private var chain: Task<Void, Never>?
@@ -438,6 +444,8 @@ final class VoiceActionService: ObservableObject {
         audioRecording = nil
         applySilence()
         showStatus("Listening stopped")
+        // AUR-823: index the backup (+ auto-upload ≥ 60 s) — the server re-transcribes it.
+        if let url { listenBackupSink(url, running.startedAt, durationMs) }
         return VoiceActionAck(id: action.id, action: action.kind.rawValue, ok: true,
                               detail: url != nil ? "backup saved" : "no local backup (no mic frames)",
                               artifact: VoiceActionArtifact(kind: .audio, uri: url, durationMs: durationMs))
@@ -458,10 +466,14 @@ final class VoiceActionService: ObservableObject {
             _ = await host?.stopPOVRecording()
             videoRecording = nil
         }
-        if audioRecording != nil {
-            _ = await micBackup?.finish()
+        if let running = audioRecording {
+            // AUR-823: a call that drops mid-listen still leaves a complete backup — index it
+            // and let the same ≥ 60 s auto-upload rule apply.
+            let durationMs = Int(Date().timeIntervalSince(running.startedAt) * 1000)
+            let url = await micBackup?.finish()
             micBackup = nil
             audioRecording = nil
+            if let url { listenBackupSink(url, running.startedAt, durationMs) }
         }
         applySilence()
     }
@@ -486,7 +498,9 @@ final class VoiceActionService: ObservableObject {
         }
     }
 
-    static func capturesDirectory() -> URL {
+    /// Documents/Captures (created on first use). nonisolated: pure FileManager work, also the
+    /// default for ListenBackupUploader's init (AUR-823).
+    nonisolated static func capturesDirectory() -> URL {
         let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         let dir = base.appendingPathComponent("Captures", isDirectory: true)

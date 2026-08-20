@@ -127,6 +127,20 @@ struct SettingsView: View {
                     Text("Advanced")
                 }
 
+                // Debug Section — AUR-823: the listen-mode backups on this phone + their
+                // server re-transcription uploads.
+                Section {
+                    NavigationLink {
+                        ListenBackupsView()
+                    } label: {
+                        Label("Listen backups", systemImage: "waveform.badge.mic")
+                    }
+                } header: {
+                    Text("Debug")
+                } footer: {
+                    Text("Local mic backups from «listen» calls; upload one to the brain to re-transcribe it (multilingual + speakers).")
+                }
+
                 // About Section
                 Section {
                     HStack {

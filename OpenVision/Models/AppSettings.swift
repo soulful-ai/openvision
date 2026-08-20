@@ -213,6 +213,11 @@ struct AppSettings: Codable, Equatable {
     /// Show live transcripts in UI
     var showTranscripts: Bool = true
 
+    /// AUR-823: auto-upload every finished listen-mode backup ≥ 60 s to the brain for
+    /// re-transcription (`POST /v1/voice/recordings/{stem}/audio`). Off = keep local only;
+    /// Settings → Debug → Listen backups still uploads on demand.
+    var listenBackupUpload: Bool = true
+
     /// Video frame rate for Gemini Live (frames per second)
     var geminiVideoFPS: Int = 1
 
