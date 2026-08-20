@@ -46,6 +46,7 @@
 		592C3761D12888A4F7E4562E /* CalendarTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83CCAB822E3A2D55FB3C338A /* CalendarTool.swift */; };
 		5C474A09B3067A8ACD7546C1 /* AudioCaptureService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2B78D6C28BEFF1F8426997C /* AudioCaptureService.swift */; };
 		5CDB24803C96E79828E957FC /* WakePreRollRingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 405049FB8E28DEF10B371231 /* WakePreRollRingTests.swift */; };
+		C2EAEFCCB22B681468DEC848 /* SessionMetadataTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A3EBDACCD14E50040EF6F84 /* SessionMetadataTests.swift */; };
 		5F19226406CF5B705B57BACF /* NativeToolSupportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE4D7E31C137C29246EB9281 /* NativeToolSupportTests.swift */; };
 		5F9D55BB6AA2E4CF8AF85A49 /* PomodoroTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45142B60B3D9295D07A3107F /* PomodoroTool.swift */; };
 		62B472287A9628E0E6FB377D /* GemmaLocalService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFBB8B07B4970CA5F63B3B2A /* GemmaLocalService.swift */; };
@@ -152,6 +153,7 @@
 		3DE51DA812A9394A5064F60E /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		40320377B81B44255CD8C57D /* OneConversationSettingsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OneConversationSettingsTests.swift; sourceTree = "<group>"; };
 		405049FB8E28DEF10B371231 /* WakePreRollRingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WakePreRollRingTests.swift; sourceTree = "<group>"; };
+		8A3EBDACCD14E50040EF6F84 /* SessionMetadataTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionMetadataTests.swift; sourceTree = "<group>"; };
 		41F6DCD4CB868C1A5711F96D /* AnimatedBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimatedBackground.swift; sourceTree = "<group>"; };
 		422747099A4406E793760E57 /* OpenAIRealtimeService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAIRealtimeService.swift; sourceTree = "<group>"; };
 		44D24962AB43639AF3B59662 /* WebSearchService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSearchService.swift; sourceTree = "<group>"; };
@@ -617,6 +619,7 @@
 				C05A9A6876CC108B7CEDFDFC /* TextChunkingTests.swift */,
 				2A348AC35DAA430AD24B329D /* VoiceActionTests.swift */,
 				405049FB8E28DEF10B371231 /* WakePreRollRingTests.swift */,
+				8A3EBDACCD14E50040EF6F84 /* SessionMetadataTests.swift */,
 			);
 			path = OpenVisionTests;
 			sourceTree = "<group>";
@@ -789,6 +792,7 @@
 				361AD2F1AB7C557D47CD125D /* TextChunkingTests.swift in Sources */,
 				1EBFC1E4E4B606FE6EFF8F95 /* VoiceActionTests.swift in Sources */,
 				5CDB24803C96E79828E957FC /* WakePreRollRingTests.swift in Sources */,
+				C2EAEFCCB22B681468DEC848 /* SessionMetadataTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

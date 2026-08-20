@@ -199,7 +199,21 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
     private init() {
         clientTools = ClientToolBridge(tools: NativeToolRegistry.shared.allTools)
         clientTools.send = { [weak self] payload in self?.send(payload) }
+        // AUR-803b: the phone crossed a time zone (or DST flipped) mid-session → the brain's
+        // session clock follows (`metadata.tz` / `utcOffsetMin`; server precedence metadata →
+        // ?tz= → profile → Europe/Amsterdam). Idle unless a session is open.
+        tzObserver = NotificationCenter.default.addObserver(
+            forName: .NSSystemTimeZoneDidChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.connectionState.isUsable else { return }
+                ovLog("[OpenAIRealtime] system time zone changed → \(TimeZone.current.identifier); re-sending metadata")
+                self.sendClientMetadata()
+            }
+        }
     }
+
+    private var tzObserver: NSObjectProtocol?
 
     // MARK: - Connection
 
@@ -371,12 +385,7 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
                 "type": "realtime",
                 "instructions": buildSystemPrompt(),
                 "output_modalities": ["audio"],
-                "metadata": [
-                    "client": Constants.RealtimeAudio.clientTag,
-                    "proto": Constants.RealtimeAudio.protocolTag,
-                    "route": routeTag,
-                    "aec": aecActive
-                ],
+                "metadata": currentClientMetadata(),
                 "audio": [
                     "input": [
                         "format": [
@@ -432,19 +441,41 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
         return prompt
     }
 
+    /// The `session.update.metadata` dict — ONE builder for the connect-time update and every
+    /// later re-declaration, so no path can forget a key. Pure (no socket, no singleton state) so
+    /// the tests can pin the shape. AUR-803b: `tz` (IANA id) + `utcOffsetMin` (minutes east of
+    /// UTC, DST included) are the phone's CURRENT zone; the brain sets the session clock from
+    /// them (precedence metadata → `?tz=` → profile → Europe/Amsterdam) and echoes
+    /// `session.updated.metadata.tz/tz_source`.
+    nonisolated static func clientMetadata(route: String, aec: Bool,
+                                           timeZone: TimeZone = .current) -> [String: Any] {
+        [
+            "client": Constants.RealtimeAudio.clientTag,
+            "proto": Constants.RealtimeAudio.protocolTag,
+            "route": route,
+            "aec": aec,
+            "tz": timeZone.identifier,
+            "utcOffsetMin": timeZone.secondsFromGMT() / 60
+        ]
+    }
+
+    /// The live metadata for THIS send, logged once per send (`🕒 tz Europe/Amsterdam (+120)`).
+    private func currentClientMetadata() -> [String: Any] {
+        let tz = TimeZone.current
+        let offset = tz.secondsFromGMT() / 60
+        ovLog("[OpenAIRealtime] 🕒 tz \(tz.identifier) (\(offset >= 0 ? "+" : "")\(offset))")
+        return Self.clientMetadata(route: routeTag, aec: aecActive, timeZone: tz)
+    }
+
     /// Re-declare the client hints mid-session (route change flipped AEC, mic moved to the
-    /// glasses, …). Metadata-only: the server applies just the keys present.
+    /// glasses, the phone changed time zone, …). Metadata-only: the server applies just the
+    /// keys present.
     private func sendClientMetadata() {
         guard connectionState.isUsable else { return }
         send([
             "type": "session.update",
             "session": [
-                "metadata": [
-                    "client": Constants.RealtimeAudio.clientTag,
-                    "proto": Constants.RealtimeAudio.protocolTag,
-                    "route": routeTag,
-                    "aec": aecActive
-                ]
+                "metadata": currentClientMetadata()
             ]
         ])
     }
