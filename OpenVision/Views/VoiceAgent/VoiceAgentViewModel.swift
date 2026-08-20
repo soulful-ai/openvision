@@ -6,6 +6,18 @@
 // The services are app-wide singletons; this ViewModel is their single orchestrator. Service
 // callbacks capture self weakly — the services outlive any owner, so strong captures would pin
 // the ViewModel forever.
+//
+// ONE conversation (AUR-742) + the BANKED push-to-ask path (AUR-744). The product has one talk
+// mechanic: «Аурелия» / tap → the realtime WS conversation (`startLiveVideoMode`). The older
+// ask-and-answer loop (wake word → Apple STT → `/v1/chat/completions` → per-sentence TTS) is
+// kept COMPILED and reachable behind `AppSettings.pushToAskEnabled` (runtime flag — no `#if`,
+// so the archived path cannot rot silently). Its choke points in this file, every one gated:
+//   startSession/stopSession/toggleSession · onWakeWordDetected fallback · onCommandCaptured →
+//   sendCommand (ask router) · setupAIServiceCallbacks (reply/partial/tool callbacks) →
+//   speakResponse/feedStreamingSpeech · handleLocalCommand/handleFaceIntent · captureAndSendPhoto
+//   · handleTakePhotoTool/handleDescribeSceneTool · local live video (SmolVLM2) · VoiceCommandService
+//   conversation mode. Inventory + removal gate: aurelia
+//   docs/product/archive/2026-08-17-push-to-ask-banked.md (memo §4).
 
 import SwiftUI
 import Speech
@@ -492,6 +504,7 @@ final class VoiceAgentViewModel: ObservableObject {
         }
     }
 
+    /// End the push-to-ask session (AUR-744). Harmless with the flag off (nothing is active).
     func stopSession() {
         // If in live video mode, stop it first
         if isLiveVideoMode {
@@ -648,6 +661,10 @@ final class VoiceAgentViewModel: ObservableObject {
             guard let self else { return }
             ovLog("[VoiceAgent] Command captured: \(command)")
 
+            guard self.settingsManager.settings.pushToAskEnabled else {
+                ovLog("[VoiceAgent] Ignoring command - push-to-ask is off (the conversation owns the mic)")
+                return
+            }
             // IMPORTANT: Only process commands when session is active
             // This prevents processing stale commands after session ends
             guard self.isSessionActive else {
@@ -687,14 +704,16 @@ final class VoiceAgentViewModel: ObservableObject {
         ovLog("[VoiceAgent] Voice command callbacks setup complete")
     }
 
-    /// Setup AI service callbacks for receiving responses
+    /// Setup AI service callbacks for receiving responses — the push-to-ask reply path (AUR-744).
+    /// Every callback here belongs to the banked loop (HTTP / on-device backends → phone TTS) and
+    /// is gated on the flag; the realtime conversation never passes through them.
     private func setupAIServiceCallbacks() {
         // Shared reply/state wiring — every AIBackend reports through the same two callbacks,
         // so wire them once for all. (Gemini Live is a streaming session and delivers replies
         // via its own transcription callbacks below; its protocol callbacks are inert.)
         for backend in AIBackendRegistry.all {
             backend.onAgentMessage = { [weak self] (message: String) in
-                guard let self else { return }
+                guard let self, self.settingsManager.settings.pushToAskEnabled else { return }
                 // In local live video mode replies must flow even if the session timer lapsed
                 // while the user was silently looking around.
                 guard self.isSessionActive || self.isLiveVideoMode else { return }
@@ -708,7 +727,7 @@ final class VoiceAgentViewModel: ObservableObject {
                 }
             }
             backend.onProcessingChanged = { [weak self] (isProcessing: Bool) in
-                guard let self else { return }
+                guard let self, self.settingsManager.settings.pushToAskEnabled else { return }
                 if isProcessing {
                     self.agentState = .thinking
                     // New reply: reset the sentence-streaming cursor for a clean start.
@@ -734,7 +753,7 @@ final class VoiceAgentViewModel: ObservableObject {
 
         // Local Gemma extra: token streaming (pipelines Apple TTS behind generation).
         GemmaLocalService.shared.onPartialResponse = { [weak self] (partial: String) in
-            guard let self else { return }
+            guard let self, self.settingsManager.settings.pushToAskEnabled else { return }
             guard self.isSessionActive || self.isLiveVideoMode else { return }
             // Show tokens as they stream so it doesn't look stuck on "thinking".
             self.aiTranscript = partial
@@ -747,7 +766,7 @@ final class VoiceAgentViewModel: ObservableObject {
         // OpenAI extra: SSE token streaming, same contract as Gemma's (cumulative text). Lets the
         // cloud backend start speaking the first sentence while the rest is still generating.
         OpenAIService.shared.onPartialResponse = { [weak self] (partial: String) in
-            guard let self else { return }
+            guard let self, self.settingsManager.settings.pushToAskEnabled else { return }
             guard self.isSessionActive || self.isLiveVideoMode else { return }
             self.aiTranscript = partial
             if self.usingAppleTTS { self.feedStreamingSpeech(partial, isFinal: false) }
@@ -763,10 +782,14 @@ final class VoiceAgentViewModel: ObservableObject {
             }
         }
 
-        // Handle tool calls (e.g., take_photo)
+        // Handle tool calls (e.g., take_photo) — OpenClaw is a push-to-ask backend (AUR-744).
         OpenClawService.shared.onToolCall = { [weak self] (toolName: String, args: [String: Any], completion: @escaping (String) -> Void) in
             guard let self else { return }
             ovLog("[VoiceAgent] Tool call: \(toolName) with args: \(args)")
+            guard self.settingsManager.settings.pushToAskEnabled else {
+                completion("Device tools are available in push-to-ask mode only (Settings → Voice Control → Debug).")
+                return
+            }
 
             switch toolName {
             case "take_photo", "capture_photo", "take_picture":
