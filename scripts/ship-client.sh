@@ -24,21 +24,27 @@ esac
 log() { printf '\n▸ %s\n' "$*"; }
 SHA=$(git rev-parse --short HEAD)
 
-# Reachability: devicectl's JSON, the one field that means "I can push bytes now" = tunnelState=connected.
+# Reachability, two steps: (1) devicectl's JSON says the phone is listed + paired (its tunnelState
+# reads "disconnected" between commands — the tunnel is established on demand, so it is NOT the
+# reachability truth; measured 2026-08-21: "disconnected" in the list, then `install app` landed);
+# (2) a cheap real round-trip (`device info details`, 45 s cap) — that IS the truth.
 reachable() {
   local j=$OTA/devices.json
   timeout 60 xcrun devicectl list devices --json-output "$j" >/dev/null 2>&1 || return 1
-  UDID="$UDID" python3 - "$j" <<'PY'
+  UDID="$UDID" python3 - "$j" <<'PY' || return 1
 import json, os, sys
 want = os.environ["UDID"]
 for d in json.load(open(sys.argv[1]))["result"]["devices"]:
     if d.get("hardwareProperties", {}).get("udid") == want:
         cp = d.get("connectionProperties", {})
-        ok = cp.get("tunnelState") == "connected" and cp.get("pairingState") == "paired"
-        print(f"  {d.get('deviceProperties',{}).get('name','?')} tunnel={cp.get('tunnelState')} pairing={cp.get('pairingState')} transport={cp.get('transportType')}")
-        sys.exit(0 if ok else 1)
+        print(f"  {d.get('deviceProperties',{}).get('name','?')} listed: tunnel={cp.get('tunnelState')} pairing={cp.get('pairingState')} transport={cp.get('transportType')}")
+        sys.exit(0 if cp.get("pairingState") == "paired" else 1)
 print("  device not listed"); sys.exit(1)
 PY
+  if timeout 45 xcrun devicectl device info details --device "$UDID" >"$OTA/ship-probe.log" 2>&1; then
+    echo "  round-trip ok (device info details)"; return 0
+  fi
+  echo "  round-trip failed (away / asleep off-network / locked) — see $OTA/ship-probe.log"; return 1
 }
 
 away() { log "AWAY mode: OTA link via scripts/ota-release.sh ($1)"; exec bash "$ROOT/scripts/ota-release.sh"; }
