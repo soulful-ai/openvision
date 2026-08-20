@@ -8,6 +8,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD; OTA=$ROOT/.ota; EXPORT=$OTA/export; ARCHIVE=$OTA/OpenVision.xcarchive
 SHA=$(git rev-parse --short HEAD); DATE=$(date +%Y-%m-%d)
+# --skip-build re-mints links for the build that IS in .ota/export → label it with that build's SHA, not HEAD
+[[ ${1:-} == --skip-build && -f $EXPORT/OpenVision.ipa && -s $OTA/.sha ]] && SHA=$(cat "$OTA/.sha")
 BUCKET=${OTA_BUCKET:-gs://soulless-modules}; PREFIX=$BUCKET/ota/openvision/$SHA
 DURATION=${OTA_URL_DURATION:-7d}
 TEAM=$(sed -nE 's/^DEVELOPMENT_TEAM *= *([A-Z0-9]+).*/\1/p' Config.xcconfig)
@@ -107,8 +109,9 @@ PENV=$(grep -E '^export AGENT_PUSH_ENV_FILE=' "$HOME/Workspace/aurelia/agent.env
 TOK=$(grep '^TELEGRAM_BOT_TOKEN=' "$PENV" 2>/dev/null | cut -d= -f2- | tr -d '"' || true)
 CHAT=$(grep '^TELEGRAM_CHAT_ID=' "$PENV" 2>/dev/null | cut -d= -f2- | tr -d '"' || true); CHAT=${CHAT:-${OTA_TELEGRAM_CHAT_ID:-5332687097}}
 [[ -n $TOK ]] || { echo "⚠ no TELEGRAM_BOT_TOKEN in $PENV — link not pushed (it is in $OTA/latest-link.txt)"; exit 0; }
-TEXT="🛰 OpenVision OTA $SHA ($DATE): tap to install → $PAGE_URL
-(valid $DURATION; iPhone: Safari opens it, tap Install, then trust the profile if asked)
-raw itms link: $ITMS"
-RES=$(curl -s -X POST "https://api.telegram.org/bot$TOK/sendMessage" -d chat_id="$CHAT" -d disable_web_page_preview=true --data-urlencode "text=$TEXT")
+TEXT="📲 <b>OpenVision OTA</b> <code>$SHA</code> · $DATE
+<a href=\"$PAGE_URL\">Install OpenVision</a> (valid 7 days — opens in Safari, tap Install)"
+KB=$(python3 -c 'import json,sys;print(json.dumps({"inline_keyboard":[[{"text":"📲 Install OpenVision","url":sys.argv[1]}]]}))' "$PAGE_URL")
+RES=$(curl -s -X POST "https://api.telegram.org/bot$TOK/sendMessage" -d chat_id="$CHAT" -d parse_mode=HTML -d disable_web_page_preview=true \
+  --data-urlencode "text=$TEXT" --data-urlencode "reply_markup=$KB")
 log "telegram → chat $CHAT: $(printf '%s' "$RES" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("ok:true msg",d["result"]["message_id"]) if d.get("ok") else print("ok:false",d)')"
