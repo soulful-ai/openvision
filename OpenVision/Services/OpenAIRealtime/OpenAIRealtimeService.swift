@@ -148,12 +148,19 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
     private var pingTask: Task<Void, Never>?
 
     /// Mic frames captured while the socket is down (bounded ring) — replayed after a resume so a
-    /// pod swap costs a hiccup, not a lost question.
+    /// pod swap costs a hiccup, not a lost question. AUR-743: ALSO fills while the first socket
+    /// is still connecting, so the mic can start the moment the rig is up (before `connect()`)
+    /// and nothing said during the handshake is lost.
     private var offlineAudio: [Data] = []
     private var offlineAudioBytes = 0
     private var offlineAudioLimitBytes: Int {
         Int(Double(inputSampleRate) * 2 * Constants.RealtimeAudio.offlineRingSeconds)
     }
+
+    /// AUR-743: the wake-word pre-roll — mic audio that followed «Аурелия» on the idle tap,
+    /// handed over by the ViewModel before `connect()` and sent as the session's FIRST
+    /// `input_audio_buffer.append` (before the offline ring, before live frames).
+    private var pendingPreRoll: WakePreRoll?
 
     // MARK: - Barge-in state
 
@@ -191,7 +198,16 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
         hasPlayedAnyReply = false
         sessionClosing = false
         endedAfterFarewell = false
-        try await openSocket(resuming: false)
+        // A fresh session starts with a clean ring: frames a FAILED previous attempt buffered
+        // while connecting must not be replayed into this one.
+        offlineAudio.removeAll(); offlineAudioBytes = 0
+        do {
+            try await openSocket(resuming: false)
+        } catch {
+            pendingPreRoll = nil
+            offlineAudio.removeAll(); offlineAudioBytes = 0
+            throw error
+        }
         reconnectAttempt = 0
     }
 
@@ -248,7 +264,8 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
             connectionState = .connected
             onConnectionStateChanged?(connectionState)
             startPinging()
-            flushOfflineAudio()
+            flushPreRoll()        // AUR-743: what followed the wake word, first
+            flushOfflineAudio()   // then what the mic heard while we were connecting / down
             ovLog("[OpenAIRealtime] Connected socket #\(generation) (session \(sessionId ?? "?"), resumed: \(resuming), route \(routeTag))")
 
         } catch {
@@ -271,6 +288,7 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
         sessionId = nil
         activeModel = nil
         runningTasks.removeAll()
+        pendingPreRoll = nil
         offlineAudio.removeAll(); offlineAudioBytes = 0
         onDisconnected?()
     }
@@ -432,7 +450,9 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
     }
 
     private func bufferOfflineAudio(_ data: Data) {
-        guard !intentionalClose, sessionId != nil else { return }
+        // A session we are resuming, OR the first socket still coming up (AUR-743: the mic runs
+        // from rig-up, before `connect()` returns). Never after we hung up.
+        guard !intentionalClose, sessionId != nil || connectionState.isAttempting else { return }
         offlineAudio.append(data)
         offlineAudioBytes += data.count
         while offlineAudioBytes > offlineAudioLimitBytes, !offlineAudio.isEmpty {
@@ -444,13 +464,42 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
         guard !offlineAudio.isEmpty else { return }
         let frames = offlineAudio
         offlineAudio.removeAll(); offlineAudioBytes = 0
-        ovLog("[OpenAIRealtime] Replaying \(frames.count) mic frames captured during the reconnect")
+        let ms = frames.reduce(0) { $0 + $1.count } / 2 * 1000 / max(1, inputSampleRate)
+        ovLog("[OpenAIRealtime] Replaying \(frames.count) mic frames (\(ms) ms) captured while the socket was connecting / down")
         for frame in frames {
             let message: [String: Any] = [
                 "type": "input_audio_buffer.append",
                 "audio": frame.base64EncodedString()
             ]
             Task { try? await sendJSON(message) }
+        }
+    }
+
+    // MARK: - Wake-word pre-roll (AUR-743)
+
+    /// Hand over the audio that followed the wake phrase. Call BEFORE `connect()`; it goes out as
+    /// the first append the moment the session is up. An empty tail is dropped (bare «Аурелия»
+    /// opens the session and stays silent — nothing is fed that could make her answer).
+    func primePreRoll(_ preRoll: WakePreRoll?) {
+        guard let preRoll, !preRoll.pcm.isEmpty else { pendingPreRoll = nil; return }
+        pendingPreRoll = preRoll
+    }
+
+    /// ONE message for the whole tail so nothing can interleave ahead of its end (live frames are
+    /// separate sends that start after `connect()` returns). The send is fire-and-forget, like
+    /// every mic frame: it adds no wait to the session coming up; what it costs the wire is
+    /// logged (`sent in … ms`) — the AUR-743 ≤100 ms budget.
+    private func flushPreRoll() {
+        guard let preRoll = pendingPreRoll else { return }
+        pendingPreRoll = nil
+        let message: [String: Any] = [
+            "type": "input_audio_buffer.append",
+            "audio": preRoll.pcm.base64EncodedString()
+        ]
+        let started = Date()
+        Task {
+            try? await sendJSON(message)
+            ovLog("[OpenAIRealtime] ⏪ wake pre-roll: \(preRoll.keptMs) ms after the wake word (trimmed: \(preRoll.trimmedWakeWord), snapshot \(preRoll.sinceDetectionMs) ms after detection) sent as the first append in \(Int(Date().timeIntervalSince(started) * 1000)) ms")
         }
     }
 

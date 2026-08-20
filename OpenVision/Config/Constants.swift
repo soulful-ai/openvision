@@ -100,6 +100,11 @@ enum Constants {
         /// Mic audio kept locally while the socket is down, so speech during a pod swap is not
         /// lost — replayed on the resumed session (plan §2.2 "5 s local ring").
         static let offlineRingSeconds: Double = 5.0
+
+        /// AUR-743: mic audio kept on the wake-word tap while idle, so «Аурелия, сколько сейчас
+        /// времени» in one breath reaches the conversation that the wake word opens — the part
+        /// after the wake phrase is replayed as the session's first `input_audio_buffer.append`.
+        static let wakePreRollSeconds: Double = 2.0
     }
 
     // MARK: - Voice

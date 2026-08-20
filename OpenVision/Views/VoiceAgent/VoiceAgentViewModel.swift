@@ -959,8 +959,15 @@ final class VoiceAgentViewModel: ObservableObject {
             return
         }
 
-        // Stop VoiceCommandService - the live backend will handle audio directly
+        // Stop VoiceCommandService - the live backend will handle audio directly. AUR-743: on a
+        // wake, take what the wearer said AFTER the wake phrase (the idle tap's pre-roll ring) —
+        // it becomes the conversation's first audio. nil on a tap-opened call.
         voiceCommandService.stopListening()
+        let preRoll = voiceCommandService.takePreRoll()
+        let sttStoppedAt = Date()
+        if let preRoll {
+            ovLog("[VoiceAgent] ⏪ pre-roll taken: \(preRoll.keptMs) ms after the wake word (trimmed: \(preRoll.trimmedWakeWord)), \(preRoll.sinceDetectionMs) ms after detection")
+        }
 
         // Stop TTS if speaking
         ttsService.stop()
@@ -1036,29 +1043,10 @@ final class VoiceAgentViewModel: ObservableObject {
         // already running for some other reason is left alone here (a POV recording owns it);
         // frames only reach the backend once the eye is asked for (see `onVideoFrame` below).
 
-        // Connect to the live backend
-        do {
-            try await service.connect()
-        } catch {
-            errorMessage = "Failed to connect to \(label): \(error.localizedDescription)"
-            activeLiveService = nil
-            // Cleanup: stop streaming and restart voice commands
-            if glassesManager.isStreaming {
-                await glassesManager.stopStreaming()
-            }
-            do {
-                try voiceCommandService.startListening()
-                voiceCommandService.enterConversationMode()
-            } catch {
-                ovLog("[VoiceAgent] Failed to restart voice commands: \(error)")
-            }
-            return
-        }
-
-        // Setup live backend callbacks
-        setupLiveVideoCallbacks(service)
-        // AUR-759: `connect()` returned after `session.created`, so the resolved model is known.
-        liveModel = (service as? OpenAIRealtimeService)?.activeModel
+        // AUR-743: the MIC comes up BEFORE the socket. Capture starts the moment the rig is up;
+        // frames captured while the handshake runs land in the service's offline ring and are
+        // replayed right after the wake pre-roll, so the only audio the wearer can lose is the
+        // rig reconfiguration itself (stop STT → engine up, logged below as the mic gap).
 
         // Setup audio capture → live backend (continuous: no isModelSpeaking gate any more).
         // AUR-776: the same frames are tee'd to the listen-mode backup writer (no-op otherwise).
@@ -1095,6 +1083,8 @@ final class VoiceAgentViewModel: ObservableObject {
         // backends keep going through `onAudioReceived`.
         if let realtime = service as? OpenAIRealtimeService {
             realtime.playback = audioPlayback
+            // AUR-743: what followed «Аурелия» goes out as the first append once the session is up.
+            realtime.primePreRoll(preRoll)
             // AUR-776: fast voice actions — the brain recognised «сфоткай» / "record a video" /
             // "listen": earcon first, then the device work, then the ack on the socket.
             voiceActions.host = self
@@ -1115,16 +1105,59 @@ final class VoiceAgentViewModel: ObservableObject {
             }
         }
 
-        // Start audio capture
+        /// Undo the rig after a failure between "mic up" and "session up".
+        func tearDownRigAfterFailure() async {
+            audioCapture.stopCapture()
+            audioCapture.onAudioCaptured = nil
+            openAIRealtime.playback = nil
+            openAIRealtime.onAction = nil
+            audioPlayback.teardown()
+            AudioSessionManager.shared.onEngineConfigurationChange = nil
+            AudioSessionManager.shared.onRouteChange = nil
+            activeLiveService = nil
+            AudioSessionManager.shared.endRealtimeRig()
+            if glassesManager.isStreaming, !isRecording { await glassesManager.stopStreaming() }
+            applyPreferredAudioRoute()
+            if isSessionActive || settingsManager.settings.wakeWordEnabled {
+                do {
+                    try voiceCommandService.startListening()
+                    if isSessionActive { voiceCommandService.enterConversationMode() }
+                } catch {
+                    ovLog("[VoiceAgent] Failed to restart voice commands: \(error)")
+                }
+            }
+        }
+
+        // Start audio capture — BEFORE the socket (AUR-743).
         do {
             try audioCapture.startCapture(engine: sharedEngine)
         } catch {
             errorMessage = "Failed to start audio capture: \(error.localizedDescription)"
-            await service.disconnect()
-            activeLiveService = nil
-            voiceCommandService.enterConversationMode()
+            await tearDownRigAfterFailure()
             return
         }
+        let micGapMs = Int(Date().timeIntervalSince(sttStoppedAt) * 1000)
+        ovLog("[VoiceAgent] ⏱ mic gap (wake-word STT stopped → live capture running): \(micGapMs) ms" + (preRoll == nil ? "" : " — the pre-roll covers up to the stop, the offline ring from here"))
+
+        // Connect to the live backend
+        do {
+            try await service.connect()
+        } catch {
+            errorMessage = "Failed to connect to \(label): \(error.localizedDescription)"
+            await tearDownRigAfterFailure()
+            return
+        }
+
+        if let wakeAt = wakeDetectedAt {
+            // AUR-743 acceptance number: wake → session up. The pre-roll adds nothing awaited to
+            // this path (ring on the audio thread, one fire-and-forget send after connect).
+            ovLog("[VoiceAgent] ⏱ wake → socket connected: \(Int(Date().timeIntervalSince(wakeAt) * 1000)) ms")
+        }
+
+        // Setup live backend callbacks
+        setupLiveVideoCallbacks(service)
+        // AUR-759: `connect()` returned after `session.created`, so the resolved model is known.
+        liveModel = (service as? OpenAIRealtimeService)?.activeModel
 
         // Setup video frame routing to the live backend. AUR-757: gated on `cameraRequested`, so
         // a glasses stream that runs for another reason (a POV recording) never feeds the brain

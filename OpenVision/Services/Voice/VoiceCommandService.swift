@@ -119,6 +119,82 @@ final class VoiceCommandService: ObservableObject {
 
     private var audioEngine: AVAudioEngine?
 
+    // MARK: - Wake-word pre-roll (AUR-743)
+
+    /// The last `Constants.RealtimeAudio.wakePreRollSeconds` of mic audio at the realtime input
+    /// rate, filled from the SAME tap the recognizer reads. On a wake the ViewModel takes the part
+    /// after the wake phrase (`takePreRoll()`) and replays it into the conversation.
+    private let preRollRing = WakePreRollRing(sampleRate: Constants.OpenAIRealtime.inputSampleRate,
+                                              seconds: Constants.RealtimeAudio.wakePreRollSeconds)
+    /// Native tap format → PCM16 mono at the realtime rate (same converter the live mic uses).
+    private var preRollChunker: AudioCaptureChunker?
+    /// Wall clock of the last wake detection, and how much audio AFTER the wake phrase the ring
+    /// already held at that moment (recognizer-timeline math, see `noteWakeWordEnd`).
+    private var wakeDetectedAt: Date?
+    private var wakeTailSecondsAtDetection: Double = 0
+    private var wakeTailTrimmed = false
+
+    /// Build (or rebuild) the converter that feeds the pre-roll ring from the tap.
+    private func preparePreRollChunker() {
+        if preRollChunker == nil {
+            preRollChunker = AudioCaptureChunker(targetSampleRate: Double(Constants.OpenAIRealtime.inputSampleRate),
+                                                frameMs: Constants.RealtimeAudio.captureFrameMs)
+            let ring = preRollRing
+            preRollChunker?.onFrame = { frame in ring.append(frame) }
+        } else {
+            preRollChunker?.resetConverter()   // the route (and so the tap format) may have changed
+        }
+    }
+
+    /// Place the END of the wake phrase on the recognizer's audio timeline (segments carry
+    /// `timestamp + duration` in seconds since the recognition request started; the ring's epoch is
+    /// marked at the same moment) and remember how much audio after it the ring already holds.
+    /// Not locatable → 0 (only audio after the detection moment will be kept).
+    private func noteWakeWordEnd(in result: SFSpeechRecognitionResult, transcription: String) {
+        wakeDetectedAt = Date()
+        let nowSec = preRollRing.secondsSinceEpoch
+        let lower = transcription.lowercased()
+        guard let variation = wakeVariations.first(where: { lower.contains($0) }),
+              let lastWord = variation.split(separator: " ").last.map(String.init) else {
+            wakeTailSecondsAtDetection = 0; wakeTailTrimmed = false
+            return
+        }
+        let segments = result.bestTranscription.segments
+        // Scan from the end: the wake phrase's last word is usually the latest segment.
+        for seg in segments.reversed() {
+            let s = seg.substring.lowercased()
+            let matches = s.contains(lastWord) || (s.count >= 4 && lastWord.contains(s))
+            if matches {
+                let end = seg.timestamp + seg.duration
+                wakeTailSecondsAtDetection = max(0, nowSec - end)
+                wakeTailTrimmed = true
+                print("[VoiceCommand] Wake phrase ends at \(String(format: "%.2f", end)) s, audio clock \(String(format: "%.2f", nowSec)) s → \(Int(wakeTailSecondsAtDetection * 1000)) ms already after it")
+                return
+            }
+        }
+        wakeTailSecondsAtDetection = 0; wakeTailTrimmed = false
+        print("[VoiceCommand] Wake phrase end not found in \(segments.count) segments — pre-roll keeps post-detection audio only")
+    }
+
+    /// AUR-743: the mic audio that FOLLOWED the wake phrase, up to now (≤ the ring length). Call
+    /// right after `stopListening()` on a wake — the ring is cleared by the call. nil when no wake
+    /// was detected (the conversation was opened by a tap).
+    func takePreRoll() -> WakePreRoll? {
+        defer { preRollRing.clear() }
+        guard let detectedAt = wakeDetectedAt else { return nil }
+        wakeDetectedAt = nil
+        let sinceDetection = Date().timeIntervalSince(detectedAt)
+        // A wake that did not open a conversation promptly (push-to-ask took it, the rig failed)
+        // is stale — the ring now holds ambient audio, not the wearer's continuation.
+        guard sinceDetection < 5 else { return nil }
+        let keep = min(preRollRing.seconds, wakeTailSecondsAtDetection + sinceDetection)
+        let pcm = preRollRing.snapshot(lastSeconds: keep)
+        return WakePreRoll(pcm: pcm,
+                           keptMs: WakePreRollRing.milliseconds(of: pcm, sampleRate: preRollRing.sampleRate),
+                           trimmedWakeWord: wakeTailTrimmed,
+                           sinceDetectionMs: Int(sinceDetection * 1000))
+    }
+
     /// Throttle for the wake-word auto-restart. On some audio routes (notably the glasses'
     /// Bluetooth HFP mic) the recognizer finalizes immediately, and restarting with no delay
     /// spins a tight infinite loop that freezes the app. We coalesce restarts to at most one
@@ -203,11 +279,18 @@ final class VoiceCommandService: ObservableObject {
             throw VoiceCommandError.audioEngineUnavailable
         }
 
+        // AUR-743: the same tap feeds the wake-word pre-roll ring (converted to the realtime rate).
+        preparePreRollChunker()
+        preRollRing.clear()
+        preRollRing.markEpoch()
+        let preRoll = preRollChunker
+
         // Install tap — wrapped so an AVAudioEngine NSException (mic busy / bad route, e.g.
         // during a phone call) fails gracefully instead of aborting the process.
         if let reason = OVCatchException({
             inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { buffer, _ in
                 recognitionRequest.append(buffer)
+                preRoll?.process(buffer)
             }
         }) {
             print("[VoiceCommand] installTap failed: \(reason)")
@@ -336,6 +419,8 @@ final class VoiceCommandService: ObservableObject {
         state = .idle
         currentTranscription = ""
         hasSpokenThisTurn = false
+        // AUR-743: the pre-roll ring is deliberately NOT cleared here — on a wake the ViewModel
+        // stops this listener and then takes the ring (`takePreRoll()`); `startListening` clears.
         print("[VoiceCommand] Stopped listening")
     }
 
@@ -411,9 +496,16 @@ final class VoiceCommandService: ObservableObject {
             return
         }
 
+        // AUR-743: the ring keeps filling across restarts (the audio is continuous; only the
+        // recognizer's timeline restarts — re-mark its epoch).
+        preparePreRollChunker()
+        preRollRing.markEpoch()
+        let preRoll = preRollChunker
+
         if let reason = OVCatchException({
             inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { buffer, _ in
                 recognitionRequest.append(buffer)
+                preRoll?.process(buffer)
             }
         }) {
             print("[VoiceCommand] installTap (reinstall) failed: \(reason)")
@@ -504,6 +596,9 @@ final class VoiceCommandService: ObservableObject {
             currentTranscription = transcription
             // Check for wake word
             if detectWakeWord(in: transcription) {
+                // AUR-743: place the end of the wake phrase on the audio clock BEFORE anything
+                // restarts the recognizer (its segment timestamps belong to THIS request).
+                noteWakeWordEnd(in: result, transcription: transcription)
                 handleWakeWordDetected()
             }
 
