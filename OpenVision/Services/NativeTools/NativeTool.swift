@@ -15,10 +15,17 @@ protocol NativeTool {
     var name: String { get }
     var description: String { get }
     var parametersSchema: [String: Any] { get }
+    /// AUR-836: the OS permission this tool cannot run without — "calendar" | "reminders" |
+    /// "notifications" — or nil when it needs none (note, clipboard, document search). The
+    /// realtime bridge pre-flights the authorization status BEFORE executing so a first-use
+    /// system prompt is answered as `permission_required:<kind>` at once instead of an 8-s timeout.
+    var permissionKind: String? { get }
     func execute(args: [String: Any]) async throws -> String
 }
 
 extension NativeTool {
+    var permissionKind: String? { nil }
+
     /// OpenAI Chat Completions tool spec (also close enough for other function-calling backends).
     var openAISpec: [String: Any] {
         [
@@ -51,12 +58,17 @@ enum NativeToolError: LocalizedError, Equatable {
     case permissionRequired(kind: String)
     /// An integration the tool needs is not linked yet. `service`: "spotify" | …
     case notLinked(service: String)
+    /// AUR-833: the tool ran and did NOT do the thing — a short wire code (`nothing_to_copy`,
+    /// `pasteboard_write_failed`, …) plus the spoken sentence for the push-to-ask path. Never
+    /// `ok:true` with a "nothing happened" string: the brain must be able to tell the user.
+    case failed(code: String, spoken: String)
 
     /// The short code that crosses the realtime wire (`aurelia.tool_result.error`).
     var wireCode: String {
         switch self {
         case .permissionRequired(let kind): return "permission_required:\(kind)"
         case .notLinked(let service): return "not_linked:\(service)"
+        case .failed(let code, _): return code
         }
     }
 
@@ -73,6 +85,8 @@ enum NativeToolError: LocalizedError, Equatable {
             }
         case .notLinked(let service):
             return "\(service.capitalized) isn't linked yet — connect it in Settings, then ask again."
+        case .failed(_, let spoken):
+            return spoken
         }
     }
 }

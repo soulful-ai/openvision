@@ -5,6 +5,7 @@ import UserNotifications
 /// Set a countdown timer via a local notification. No external API.
 struct TimerTool: NativeTool {
     let name = "set_timer"
+    let permissionKind: String? = "notifications"   // AUR-836 pre-flight
     let description = "Set a countdown timer that notifies the user after a duration. Use for 'set a 10 minute timer', 'timer for the pasta', etc."
     let parametersSchema: [String: Any] = [
         "type": "object",

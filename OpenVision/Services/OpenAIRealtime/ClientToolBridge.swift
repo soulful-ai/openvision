@@ -12,16 +12,33 @@
 //                                           connections:{calendar,reminders,notifications,spotify}}
 //                     — right after the session's session.update on every (re)connect, and again
 //                       whenever a connection state changes (app became active after a prompt,
-//                       a tool just hit a permission wall).
+//                       a permission prompt just resolved).
 //   server → client   aurelia.tool_call {id, name:"phone.<tool>", args, timeoutMs}
-//   client → server   aurelia.tool_result {id, ok:true, result:"<≤1024 chars>"}
+//   client → client   aurelia.tool_result {id, ok:true, result:"<≤1024 chars>",
+//                                          appState:"active"|"background"|"inactive",
+//                                          permissionState:"granted"|"denied"|"notDetermined"|"n/a"}
 //                     aurelia.tool_result {id, ok:false, error:"permission_required:calendar" |
 //                                          "not_linked:spotify" | "timeout" | "busy" |
-//                                          "unknown_tool" | "<short>"}
+//                                          "unknown_tool" | "nothing_to_copy" | "<short>",
+//                                          appState, permissionState}
 //
 // Names: `phone.` + snake_case of the registry name (`^phone\.[a-z0-9_]{1,40}$`), ≤32 tools,
 // schema ≤4 KB each, one call in flight per name (a second is answered `busy`), per-call timeout
 // (default 8 s, 15 s for document search; the server's `timeoutMs` on the call wins when present).
+//
+// AUR-836 — permission prompts are a STATE, not a timeout. The ride-home analysis (2026-08-20 F9)
+// had three first-use prompts = three 8-s timeouts with the late `ok` dropped on both sides.
+// Now every permission-bound tool is pre-flighted BEFORE it runs:
+//   granted        → run as before (8-s timeout).
+//   denied         → `permission_required:<kind>` + permissionState:"denied" at once; no prompt.
+//   notDetermined  → `permission_required:<kind>` + permissionState:"notDetermined" at once (the
+//                    brain speaks the one sentence), THEN the system prompt is requested; when it
+//                    resolves the manifest is re-sent with the new connections and, if granted, the
+//                    ORIGINAL call is re-executed and its `ok` goes out as a LATE result for the
+//                    SAME id — the server parks the call for 30 s and accepts it. No timeout runs
+//                    while the prompt is up (a prompt is not a slow tool).
+// AUR-837 — observability: every result carries `appState` + `permissionState`; the bridge keeps
+// the last 10 calls for the Debug → Phone tools read-out; the log line carries appState.
 
 import Foundation
 import EventKit
@@ -34,6 +51,16 @@ import UIKit
 /// integrations that need an account link (Spotify, AUR-793) use `linked`/`unlinked`.
 enum PhoneConnectionState: String, Equatable {
     case granted, denied, unknown
+
+    /// The `permissionState` spelling on `aurelia.tool_result` (AUR-837): `unknown` on the
+    /// manifest IS `notDetermined` on the result — the wording the server spec uses.
+    var permissionStateWire: String {
+        switch self {
+        case .granted: return "granted"
+        case .denied: return "denied"
+        case .unknown: return "notDetermined"
+        }
+    }
 }
 
 /// Snapshot of every connection the manifest reports. Equatable so a re-check after the app comes
@@ -62,6 +89,16 @@ struct PhoneConnections: Equatable {
          ("Notifications", notifications.rawValue), ("Spotify", spotify)]
     }
 
+    /// The state for one permission kind (a tool's `permissionKind`); nil for an unknown kind.
+    func state(for kind: String) -> PhoneConnectionState? {
+        switch kind {
+        case "calendar": return calendar
+        case "reminders": return reminders
+        case "notifications": return notifications
+        default: return nil
+        }
+    }
+
     /// Read the REAL states — no prompts, no side effects. EventKit is synchronous; the
     /// notification settings are async.
     static func current() async -> PhoneConnections {
@@ -86,6 +123,25 @@ struct PhoneConnections: Equatable {
         @unknown default: return .unknown
         }
     }
+
+    /// Show the system prompt for one kind (AUR-836). Returns true when access was granted.
+    /// Only ever called after a `notDetermined` read — a granted/denied state never prompts.
+    static func requestPermission(kind: String) async -> Bool {
+        switch kind {
+        case "calendar":
+            let store = EKEventStore()
+            if #available(iOS 17.0, *) { return (try? await store.requestFullAccessToEvents()) ?? false }
+            return (try? await store.requestAccess(to: .event)) ?? false
+        case "reminders":
+            let store = EKEventStore()
+            if #available(iOS 17.0, *) { return (try? await store.requestFullAccessToReminders()) ?? false }
+            return (try? await store.requestAccess(to: .reminder)) ?? false
+        case "notifications":
+            return (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])) ?? false
+        default:
+            return false
+        }
+    }
 }
 
 /// What one tool call produced: the text to send, or the wire error code.
@@ -94,10 +150,27 @@ enum ClientToolOutcome: Equatable {
     case failure(String)
 }
 
+/// One finished call, for the Debug → Phone tools read-out (AUR-837): the last 10 are kept.
+struct ClientToolCallRecord: Identifiable, Equatable {
+    let id: String
+    let wireName: String
+    let ok: Bool
+    /// The error code for a failure, nil for success.
+    let error: String?
+    let ms: Int
+    let appState: AppForegroundState
+    let permissionState: String
+    let late: Bool
+    let at: Date
+
+    var shortName: String { wireName.hasPrefix(ClientToolBridge.namePrefix) ? String(wireName.dropFirst(ClientToolBridge.namePrefix.count)) : wireName }
+    var statusText: String { ok ? (late ? "ok (late)" : "ok") : "err \(error ?? "?")" }
+}
+
 // MARK: - Bridge
 
 @MainActor
-final class ClientToolBridge {
+final class ClientToolBridge: ObservableObject {
 
     // MARK: Limits (the wire contract)
 
@@ -111,6 +184,7 @@ final class ClientToolBridge {
     static let timeoutOverrides: [String: Int] = ["search_docs": 15000]
     static let minTimeoutMs = 500
     static let maxTimeoutMs = 60_000
+    static let recentCallsKept = 10
 
     /// One advertised tool: the wire name, the tool, its default timeout.
     struct Entry {
@@ -128,20 +202,38 @@ final class ClientToolBridge {
     var send: (([String: Any]) -> Void)?
     /// How the bridge reads permission states — injectable so tests never touch EventKit.
     var connectionsProvider: () async -> PhoneConnections
+    /// How the bridge shows a system permission prompt (AUR-836) — injectable; returns granted?
+    var permissionRequester: (String) async -> Bool = { await PhoneConnections.requestPermission(kind: $0) }
+    /// How the bridge reads the app's foreground state (AUR-837) — injectable.
+    var appStateProvider: () -> AppForegroundState = { AppForegroundState.current() }
     /// Last connections snapshot that went out (Settings → Debug shows it).
     private(set) var lastSentConnections: PhoneConnections?
     private(set) var lastManifestSentAt: Date?
     /// True between `sessionDidConnect` and `sessionDidDisconnect` — nothing is sent otherwise.
     private(set) var isSessionActive = false
+    /// The last 10 finished calls, newest first (AUR-837 Debug read-out).
+    @Published private(set) var recentCalls: [ClientToolCallRecord] = []
 
     private struct InFlight {
         let wireName: String
         let startedAt: Date
-        let exec: Task<Void, Never>
-        let timeout: Task<Void, Never>
+        let args: [String: Any]
+        let timeoutMs: Int
+        let permissionKind: String?
+        /// The whole pipeline (pre-flight → run, or pre-flight → prompt → late run).
+        var pipeline: Task<Void, Never>?
+        /// The deadline for the tool body — armed only when a body is actually running.
+        var timeout: Task<Void, Never>?
+        /// Pre-flight result, the `permissionState` the answer carries.
+        var permissionState: PhoneConnectionState?
+        /// True once the immediate `permission_required` went out: the next answer is the late one.
+        var late = false
     }
     private var inFlight: [String: InFlight] = [:]     // call id → work
     private var busyNames: Set<String> = []            // one call per wire name
+    /// Permission kinds with a system prompt currently up (AUR-836): a second call that needs
+    /// the same kind is answered `permission_required:<kind>` at once, not prompted twice.
+    private var promptingKinds: Set<String> = []
     private var appActiveObserver: NSObjectProtocol?
     private var manifestTask: Task<Void, Never>?
 
@@ -228,6 +320,12 @@ final class ClientToolBridge {
     /// The advertised wire names, in order.
     var toolNames: [String] { entries.map(\.wireName) }
 
+    /// Wire name → the permission kind the tool pre-flights (nil = none). The AUR-836 mapping,
+    /// exposed for the tests and the Debug read-out.
+    func permissionKind(for wireName: String) -> String? {
+        entries.first(where: { $0.wireName == wireName })?.tool.permissionKind
+    }
+
     /// The `aurelia.client_tools` payload for a given connections snapshot.
     func manifest(connections: PhoneConnections) -> [String: Any] {
         let tools: [[String: Any]] = entries.map { e in
@@ -273,9 +371,10 @@ final class ClientToolBridge {
         if !inFlight.isEmpty {
             ovLog("📱 client_tools: socket closed with \(inFlight.count) call(s) in flight — cancelled")
         }
-        for (_, work) in inFlight { work.exec.cancel(); work.timeout.cancel() }
+        for (_, work) in inFlight { work.pipeline?.cancel(); work.timeout?.cancel() }
         inFlight.removeAll()
         busyNames.removeAll()
+        promptingKinds.removeAll()
     }
 
     /// Read the real states; if they differ from what the brain last saw, send the manifest again.
@@ -309,7 +408,8 @@ final class ClientToolBridge {
 
     // MARK: Tool calls
 
-    /// `aurelia.tool_call {id, name, args, timeoutMs}` → run the tool, answer `aurelia.tool_result`.
+    /// `aurelia.tool_call {id, name, args, timeoutMs}` → pre-flight, run the tool, answer
+    /// `aurelia.tool_result`.
     func handleToolCall(_ json: [String: Any]) {
         guard let id = json["id"] as? String, !id.isEmpty else {
             ovLog("📱 tool_call without id — ignored")
@@ -324,16 +424,28 @@ final class ClientToolBridge {
         }
         guard let entry = entries.first(where: { $0.wireName == name }) else {
             ovLog("📱 tool_call \(name) \(id) → err unknown_tool")
-            sendResult(id: id, .failure("unknown_tool"))
+            sendResult(id: id, .failure("unknown_tool"), permissionState: nil)
+            record(id: id, wireName: name, .failure("unknown_tool"), ms: 0, permissionState: "n/a", late: false)
             return
         }
         guard inFlight[id] == nil else {
             ovLog("📱 tool_call \(name) \(id) — duplicate id, ignored")
             return
         }
+        let kind = entry.tool.permissionKind
+        // A prompt for this kind is already up (another tool of the same kind asked first):
+        // answer the state, don't queue a second prompt behind it.
+        if let kind, promptingKinds.contains(kind) {
+            ovLog("📱 tool_call \(name) \(id) → err permission_required:\(kind) (prompt already up) appState=\(appStateProvider().rawValue)")
+            sendResult(id: id, .failure("permission_required:\(kind)"), permissionState: .unknown)
+            record(id: id, wireName: name, .failure("permission_required:\(kind)"), ms: 0,
+                   permissionState: PhoneConnectionState.unknown.permissionStateWire, late: false)
+            return
+        }
         guard !busyNames.contains(name) else {
             ovLog("📱 tool_call \(name) \(id) → err busy (one in flight per tool)")
-            sendResult(id: id, .failure("busy"))
+            sendResult(id: id, .failure("busy"), permissionState: nil)
+            record(id: id, wireName: name, .failure("busy"), ms: 0, permissionState: "n/a", late: false)
             return
         }
 
@@ -341,12 +453,60 @@ final class ClientToolBridge {
         let timeoutMs = min(Self.maxTimeoutMs, max(Self.minTimeoutMs, requested ?? entry.timeoutMs))
         let startedAt = Date()
         busyNames.insert(name)
-        ovLog("📱 tool_call \(name) \(id) ▶ (\(args.keys.sorted().joined(separator: ", "))) timeout \(timeoutMs) ms")
+        ovLog("📱 tool_call \(name) \(id) ▶ (\(args.keys.sorted().joined(separator: ", "))) timeout \(timeoutMs) ms appState=\(appStateProvider().rawValue)\(kind.map { " permission=\($0)" } ?? "")")
 
-        // Two unstructured tasks race; `finish` is idempotent so whichever lands second is a no-op.
-        // A tool that ignores cancellation (EventKit does) still answers the wire on time — the
-        // late result is simply dropped.
-        let tool = entry.tool
+        var work = InFlight(wireName: name, startedAt: startedAt, args: args, timeoutMs: timeoutMs,
+                            permissionKind: kind)
+        work.pipeline = Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard let kind else {
+                // No permission involved: straight to the body.
+                self.runBody(id: id, tool: entry.tool, late: false)
+                return
+            }
+            // AUR-836 pre-flight: read the REAL status, no side effects.
+            let state = (await self.connectionsProvider()).state(for: kind) ?? .unknown
+            guard !Task.isCancelled, self.inFlight[id] != nil else { return }
+            self.inFlight[id]?.permissionState = state
+            switch state {
+            case .granted:
+                self.runBody(id: id, tool: entry.tool, late: false)
+            case .denied:
+                self.finish(id: id, .failure("permission_required:\(kind)"))
+            case .unknown:
+                // Answer NOW (the brain speaks the one sentence) — then prompt, then maybe run.
+                self.ovLogPermission("pre-flight notDetermined — answering permission_required:\(kind) before the prompt", name: name, id: id)
+                self.sendResult(id: id, .failure("permission_required:\(kind)"), permissionState: .unknown)
+                self.inFlight[id]?.late = true
+                self.promptingKinds.insert(kind)
+                let granted = await self.permissionRequester(kind)
+                self.promptingKinds.remove(kind)
+                guard !Task.isCancelled, self.isSessionActive else { return }
+                // The manifest goes out right after the prompt resolves — not only on app-active.
+                self.sendManifest(reason: "permission prompt resolved: \(kind)=\(granted ? "granted" : "denied")")
+                guard self.inFlight[id] != nil else { return }
+                self.inFlight[id]?.permissionState = granted ? .granted : .denied
+                if granted {
+                    self.ovLogPermission("prompt granted — re-running the original call (late result for the same id)", name: name, id: id)
+                    self.runBody(id: id, tool: entry.tool, late: true)
+                } else {
+                    self.ovLogPermission("prompt denied — no late result", name: name, id: id)
+                    self.drop(id: id)
+                }
+            }
+        }
+        inFlight[id] = work
+    }
+
+    private func ovLogPermission(_ what: String, name: String, id: String) {
+        ovLog("📱 tool_call \(name) \(id) ⏳ \(what)")
+    }
+
+    /// Run the tool body with its timeout (the 8-s budget is for genuinely slow tools, never for
+    /// the permission path — it is armed here, after the pre-flight decided to run).
+    private func runBody(id: String, tool: NativeTool, late: Bool) {
+        guard let work = inFlight[id] else { return }
+        let args = work.args
         let exec = Task { [weak self] in
             let outcome: Outcome
             do {
@@ -362,36 +522,56 @@ final class ClientToolBridge {
             await self?.finish(id: id, outcome)
         }
         let timeout = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(timeoutMs) * 1_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(work.timeoutMs) * 1_000_000)
             guard !Task.isCancelled else { return }
             await self?.finish(id: id, .failure("timeout"))
         }
-        inFlight[id] = InFlight(wireName: name, startedAt: startedAt, exec: exec, timeout: timeout)
+        // The body task replaces the pipeline slot (the pipeline is finishing now anyway); the
+        // timeout is armed only here.
+        inFlight[id]?.pipeline = exec
+        inFlight[id]?.timeout = timeout
+        inFlight[id]?.late = late
     }
 
     typealias Outcome = ClientToolOutcome
 
+    /// Remove the in-flight record and free the name WITHOUT answering (a denied prompt: the
+    /// `permission_required` already went out).
+    private func drop(id: String) {
+        guard let work = inFlight.removeValue(forKey: id) else { return }
+        work.timeout?.cancel()
+        busyNames.remove(work.wireName)
+        let ms = Int(Date().timeIntervalSince(work.startedAt) * 1000)
+        record(id: id, wireName: work.wireName, .failure("permission_required:\(work.permissionKind ?? "?")"),
+               ms: ms, permissionState: (work.permissionState ?? .denied).permissionStateWire, late: false)
+    }
+
     /// First writer wins: remove the in-flight record, free the name, answer the wire, log.
     private func finish(id: String, _ outcome: Outcome) {
         guard let work = inFlight.removeValue(forKey: id) else { return }   // already answered
-        work.exec.cancel()
-        work.timeout.cancel()
+        work.pipeline?.cancel()
+        work.timeout?.cancel()
         busyNames.remove(work.wireName)
         let ms = Int(Date().timeIntervalSince(work.startedAt) * 1000)
+        let appState = appStateProvider()
+        let permState = work.permissionKind == nil ? "n/a" : (work.permissionState ?? .unknown).permissionStateWire
+        let lateTag = work.late ? " (late, after permission)" : ""
         switch outcome {
         case .success(let text):
-            ovLog("📱 tool_call \(work.wireName) \(id) → ok in \(ms) ms (\(text.count) chars)")
+            ovLog("📱 tool_call \(work.wireName) \(id) → ok\(lateTag) in \(ms) ms (\(text.count) chars) appState=\(appState.rawValue) permission=\(permState)")
         case .failure(let code):
-            ovLog("📱 tool_call \(work.wireName) \(id) → err \(code) in \(ms) ms")
-            // A permission wall may have just shown (or been dismissed) — tell the brain the
-            // new state without waiting for the next foreground hop.
+            ovLog("📱 tool_call \(work.wireName) \(id) → err \(code)\(lateTag) in \(ms) ms appState=\(appState.rawValue) permission=\(permState)")
+            // A permission wall may have just shown (or been dismissed) inside the tool body —
+            // tell the brain the new state without waiting for the next foreground hop.
             if code.hasPrefix("permission_required:") { refreshConnections(reason: "after \(code)") }
         }
+        record(id: id, wireName: work.wireName, outcome, ms: ms, permissionState: permState, late: work.late)
         guard isSessionActive else { return }
-        sendResult(id: id, outcome)
+        sendResult(id: id, outcome, permissionState: work.permissionKind == nil ? nil : (work.permissionState ?? .unknown))
     }
 
-    private func sendResult(id: String, _ outcome: Outcome) {
+    /// `aurelia.tool_result` with the AUR-837 fields. `permissionState` nil → "n/a".
+    private func sendResult(id: String, _ outcome: Outcome, permissionState: PhoneConnectionState?) {
         var payload: [String: Any] = ["type": "aurelia.tool_result", "id": id]
         switch outcome {
         case .success(let text):
@@ -401,7 +581,23 @@ final class ClientToolBridge {
             payload["ok"] = false
             payload["error"] = code
         }
+        payload["appState"] = appStateProvider().rawValue
+        payload["permissionState"] = permissionState?.permissionStateWire ?? "n/a"
         send?(payload)
+    }
+
+    /// Keep the last 10 finished calls, newest first (AUR-837).
+    private func record(id: String, wireName: String, _ outcome: Outcome, ms: Int, permissionState: String, late: Bool) {
+        let ok: Bool, error: String?
+        switch outcome {
+        case .success: ok = true; error = nil
+        case .failure(let code): ok = false; error = code
+        }
+        let rec = ClientToolCallRecord(id: id, wireName: wireName, ok: ok, error: error, ms: ms,
+                                       appState: appStateProvider(), permissionState: permissionState,
+                                       late: late, at: Date())
+        recentCalls.insert(rec, at: 0)
+        if recentCalls.count > Self.recentCallsKept { recentCalls.removeLast(recentCalls.count - Self.recentCallsKept) }
     }
 
     /// ≤1024 chars; a clipped result ends in "…" so the brain knows it is a prefix.

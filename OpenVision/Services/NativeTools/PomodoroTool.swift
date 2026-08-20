@@ -5,6 +5,7 @@ import UserNotifications
 /// Start a Pomodoro: a focus block followed by a break, each ending with a notification.
 struct PomodoroTool: NativeTool {
     let name = "start_pomodoro"
+    let permissionKind: String? = "notifications"   // AUR-836 pre-flight
     let description = "Start a Pomodoro focus session: a work block then a break, each ending with an alert. Defaults: 25 min work, 5 min break."
     let parametersSchema: [String: Any] = [
         "type": "object",

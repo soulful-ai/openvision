@@ -5,6 +5,7 @@ import EventKit
 /// Create a reminder in Apple Reminders, optionally with a due date/time.
 struct ReminderTool: NativeTool {
     let name = "create_reminder"
+    let permissionKind: String? = "reminders"   // AUR-836 pre-flight
     let description = "Create a reminder in Apple Reminders, optionally with a due time. Use for 'remind me to call mom at 5pm', 'remind me to buy milk'."
     let parametersSchema: [String: Any] = [
         "type": "object",

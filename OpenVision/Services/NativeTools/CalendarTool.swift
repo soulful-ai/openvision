@@ -5,6 +5,7 @@ import EventKit
 /// Read the calendar (today / upcoming) or add an event.
 struct CalendarTool: NativeTool {
     let name = "calendar"
+    let permissionKind: String? = "calendar"   // AUR-836 pre-flight
     let description = "Read or add calendar events. action 'today' lists today's events, 'upcoming' lists the next 7 days, 'add' creates an event (needs title and start_iso8601)."
     let parametersSchema: [String: Any] = [
         "type": "object",

@@ -361,7 +361,8 @@ private struct PhoneToolsDebugRows: View {
     @State private var connections: PhoneConnections?
     @State private var expanded = false
 
-    private var bridge: ClientToolBridge { OpenAIRealtimeService.shared.clientTools }
+    /// AUR-837: observed so the "last 10 calls" rows refresh as results land.
+    @ObservedObject private var bridge: ClientToolBridge = OpenAIRealtimeService.shared.clientTools
 
     var body: some View {
         DisclosureGroup(isExpanded: $expanded) {
@@ -386,6 +387,27 @@ private struct PhoneToolsDebugRows: View {
                     .foregroundColor(.secondary)
             }
             .font(.caption)
+            // AUR-837: the last 10 calls — name, ok/err, ms, appState (newest first).
+            if bridge.recentCalls.isEmpty {
+                Text("No tool calls yet this launch")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                Text("Last \(bridge.recentCalls.count) call\(bridge.recentCalls.count == 1 ? "" : "s")")
+                    .font(.caption.weight(.semibold))
+                ForEach(bridge.recentCalls) { call in
+                    HStack(spacing: 6) {
+                        Text(call.shortName)
+                            .font(.caption.monospaced())
+                        Text(call.statusText)
+                            .foregroundColor(call.ok ? .green : .orange)
+                        Spacer()
+                        Text("\(call.ms) ms · \(call.appState.rawValue)")
+                            .foregroundColor(.secondary)
+                    }
+                    .font(.caption)
+                }
+            }
         } label: {
             HStack {
                 Label("Phone tools", systemImage: "iphone.radiowaves.left.and.right")

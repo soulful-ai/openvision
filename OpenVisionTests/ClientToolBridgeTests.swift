@@ -12,6 +12,7 @@ final class ClientToolBridgeTests: XCTestCase {
         let name: String
         var description: String = "fake"
         var parametersSchema: [String: Any] = ["type": "object", "properties": [:]]
+        var permissionKind: String? = nil
         var body: @Sendable ([String: Any]) async throws -> String = { _ in "ok" }
         func execute(args: [String: Any]) async throws -> String { try await body(args) }
     }
@@ -326,6 +327,218 @@ final class ClientToolBridgeTests: XCTestCase {
         // Short results pass through untouched.
         XCTAssertEqual(ClientToolBridge.truncated("short"), "short")
         XCTAssertEqual(ClientToolBridge.truncated(String(repeating: "a", count: 1024)).count, 1024)
+    }
+
+    // MARK: - AUR-837: every result carries appState + permissionState
+
+    func testEveryResultCarriesAppStateAndPermissionState() async {
+        let (bridge, sent) = makeBridge([FakeTool(name: "note")])
+        bridge.appStateProvider = { .background }
+        bridge.sessionDidConnect()
+        await waitFor(sent, count: 1)
+        call(bridge, id: "r1", name: "phone.note", args: ["text": "x"])
+        call(bridge, id: "r2", name: "phone.nope")
+        await waitFor(sent, count: 3)
+        for r in sent.results {
+            XCTAssertEqual(r["appState"] as? String, "background", "\(r)")
+            XCTAssertEqual(r["permissionState"] as? String, "n/a", "a tool without a permission kind says n/a: \(r)")
+        }
+        XCTAssertNoThrow(try JSONSerialization.data(withJSONObject: sent.results.first!))
+        // The Debug read-out remembers the calls, newest first.
+        // r2 (unknown_tool) is recorded synchronously at call time; r1 finishes after it.
+        XCTAssertEqual(bridge.recentCalls.map(\.id), ["r1", "r2"])
+        XCTAssertEqual(bridge.recentCalls.first?.appState, .background)
+    }
+
+    func testRecentCallsKeepsTheLastTen() async {
+        let (bridge, sent) = makeBridge([FakeTool(name: "echo")])
+        bridge.sessionDidConnect()
+        await waitFor(sent, count: 1)
+        for i in 0..<13 {
+            call(bridge, id: "c\(i)", name: "phone.echo")
+            await waitFor(sent, count: 2 + i)
+        }
+        XCTAssertEqual(bridge.recentCalls.count, ClientToolBridge.recentCallsKept)
+        XCTAssertEqual(bridge.recentCalls.first?.id, "c12")
+        XCTAssertEqual(bridge.recentCalls.last?.id, "c3")
+        XCTAssertEqual(bridge.recentCalls.first?.statusText, "ok")
+        XCTAssertEqual(bridge.recentCalls.first?.shortName, "echo")
+    }
+
+    // MARK: - AUR-836: pre-flight mapping + permission prompts as a state
+
+    func testPreflightMappingOnTheRealRegistry() {
+        let bridge = ClientToolBridge(tools: NativeToolRegistry.shared.allTools, connectionsProvider: { PhoneConnections() })
+        XCTAssertEqual(bridge.permissionKind(for: "phone.calendar"), "calendar")
+        XCTAssertEqual(bridge.permissionKind(for: "phone.create_reminder"), "reminders")
+        XCTAssertEqual(bridge.permissionKind(for: "phone.set_timer"), "notifications")
+        XCTAssertEqual(bridge.permissionKind(for: "phone.start_pomodoro"), "notifications")
+        XCTAssertNil(bridge.permissionKind(for: "phone.copy_to_clipboard"))
+        XCTAssertNil(bridge.permissionKind(for: "phone.search_docs"))
+        XCTAssertNil(bridge.permissionKind(for: "phone.nope"))
+        // The manifest `unknown` is the result's `notDetermined`.
+        XCTAssertEqual(PhoneConnectionState.unknown.permissionStateWire, "notDetermined")
+        XCTAssertEqual(PhoneConnectionState.granted.permissionStateWire, "granted")
+        XCTAssertEqual(PhoneConnectionState.denied.permissionStateWire, "denied")
+        XCTAssertEqual(PhoneConnections(calendar: .denied).state(for: "calendar"), .denied)
+        XCTAssertNil(PhoneConnections().state(for: "spotify"))
+    }
+
+    func testGrantedPreflightRunsTheToolAndSaysGranted() async {
+        let ran = Flag()
+        let cal = FakeTool(name: "calendar", permissionKind: "calendar", body: { _ in ran.set(); return "2 events" })
+        let (bridge, sent) = makeBridge([cal], connections: PhoneConnections(calendar: .granted))
+        var prompted = false
+        bridge.permissionRequester = { _ in prompted = true; return true }
+        bridge.sessionDidConnect()
+        await waitFor(sent, count: 1)
+        call(bridge, id: "g1", name: "phone.calendar", args: ["action": "today"])
+        await waitFor(sent, count: 2)
+        let r = sent.results.first
+        XCTAssertEqual(r?["ok"] as? Bool, true)
+        XCTAssertEqual(r?["result"] as? String, "2 events")
+        XCTAssertEqual(r?["permissionState"] as? String, "granted")
+        XCTAssertTrue(ran.value)
+        XCTAssertFalse(prompted, "granted never prompts")
+    }
+
+    func testDeniedPreflightAnswersPermissionRequiredWithoutPromptOrRun() async {
+        let ran = Flag()
+        let rem = FakeTool(name: "create_reminder", permissionKind: "reminders", body: { _ in ran.set(); return "added" })
+        let (bridge, sent) = makeBridge([rem], connections: PhoneConnections(reminders: .denied))
+        var prompted = false
+        bridge.permissionRequester = { _ in prompted = true; return true }
+        bridge.sessionDidConnect()
+        await waitFor(sent, count: 1)
+        call(bridge, id: "d1", name: "phone.create_reminder", args: ["title": "milk"])
+        await waitFor(sent, count: 2)
+        let r = sent.results.first
+        XCTAssertEqual(r?["id"] as? String, "d1")
+        XCTAssertEqual(r?["ok"] as? Bool, false)
+        XCTAssertEqual(r?["error"] as? String, "permission_required:reminders")
+        XCTAssertEqual(r?["permissionState"] as? String, "denied")
+        XCTAssertFalse(prompted, "denied never prompts")
+        XCTAssertFalse(ran.value, "denied never runs the tool")
+        // The name is free again right away.
+        call(bridge, id: "d2", name: "phone.create_reminder", args: ["title": "milk"])
+        await waitFor(sent, count: 3)
+        XCTAssertEqual(sent.results.last?["error"] as? String, "permission_required:reminders")
+    }
+
+    func testNotDeterminedAnswersAtOncePromptsThenSendsTheLateOkForTheSameId() async {
+        let runs = Counter()
+        let timer = FakeTool(name: "set_timer", permissionKind: "notifications", body: { _ in runs.bump(); return "Timer set for 10 minutes." })
+        let (bridge, sent) = makeBridge([timer], connections: PhoneConnections(notifications: .unknown))
+        let prompt = Gate()
+        var prompts = 0
+        bridge.permissionRequester = { kind in
+            prompts += 1
+            XCTAssertEqual(kind, "notifications")
+            await prompt.wait()                      // the user is riding; he taps Allow later
+            return true
+        }
+        bridge.sessionDidConnect()
+        await waitFor(sent, count: 1)
+
+        let t0 = Date()
+        call(bridge, id: "n1", name: "phone.set_timer", args: ["seconds": 600], timeoutMs: 500)
+        // 1. permission_required goes out at once — long before any 8-s / 500-ms timeout.
+        await waitFor(sent, count: 2)
+        XCTAssertLessThan(Date().timeIntervalSince(t0), 0.4)
+        let first = sent.results.first
+        XCTAssertEqual(first?["id"] as? String, "n1")
+        XCTAssertEqual(first?["ok"] as? Bool, false)
+        XCTAssertEqual(first?["error"] as? String, "permission_required:notifications")
+        XCTAssertEqual(first?["permissionState"] as? String, "notDetermined")
+        XCTAssertEqual(runs.value, 0, "the tool does not run before the prompt resolves")
+        XCTAssertEqual(prompts, 1)
+
+        // 2. A second call of the same kind while the prompt is up: answered as the state, no
+        //    second prompt, not `busy`.
+        call(bridge, id: "n2", name: "phone.set_timer", args: ["seconds": 60])
+        await waitFor(sent, count: 3)
+        XCTAssertEqual(sent.results.last?["id"] as? String, "n2")
+        XCTAssertEqual(sent.results.last?["error"] as? String, "permission_required:notifications")
+        XCTAssertEqual(prompts, 1)
+
+        // 3. No timeout fires while the prompt is up (the 500-ms budget has long passed).
+        try? await Task.sleep(nanoseconds: 900_000_000)
+        XCTAssertEqual(sent.results.filter { ($0["error"] as? String) == "timeout" }.count, 0)
+        XCTAssertEqual(sent.manifests.count, 1)
+
+        // 4. He taps Allow: the manifest is re-sent with the new state, the ORIGINAL call re-runs,
+        //    and its ok goes out as a LATE result for the SAME id.
+        bridge.connectionsProvider = { PhoneConnections(notifications: .granted) }
+        prompt.open()
+        await waitFor(sent, count: 5)
+        XCTAssertEqual(sent.manifests.count, 2)
+        XCTAssertEqual((sent.manifests.last?["connections"] as? [String: String])?["notifications"], "granted")
+        let late = sent.results.last
+        XCTAssertEqual(late?["id"] as? String, "n1")
+        XCTAssertEqual(late?["ok"] as? Bool, true)
+        XCTAssertEqual(late?["result"] as? String, "Timer set for 10 minutes.")
+        XCTAssertEqual(late?["permissionState"] as? String, "granted")
+        XCTAssertEqual(runs.value, 1, "re-run exactly once")
+        XCTAssertEqual(bridge.recentCalls.first?.late, true)
+        XCTAssertEqual(bridge.recentCalls.first?.statusText, "ok (late)")
+
+        // 5. Name free again; the next call pre-flights granted and runs straight away.
+        call(bridge, id: "n3", name: "phone.set_timer", args: ["seconds": 60])
+        await waitFor(sent, count: 6)
+        XCTAssertEqual(sent.results.last?["id"] as? String, "n3")
+        XCTAssertEqual(sent.results.last?["ok"] as? Bool, true)
+        XCTAssertEqual(prompts, 1)
+        XCTAssertEqual(runs.value, 2)
+    }
+
+    func testNotDeterminedThenDeniedAtThePromptSendsNoLateResult() async {
+        let runs = Counter()
+        let cal = FakeTool(name: "calendar", permissionKind: "calendar", body: { _ in runs.bump(); return "x" })
+        let (bridge, sent) = makeBridge([cal], connections: PhoneConnections(calendar: .unknown))
+        bridge.permissionRequester = { _ in
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            return false
+        }
+        bridge.sessionDidConnect()
+        await waitFor(sent, count: 1)
+        call(bridge, id: "x1", name: "phone.calendar")
+        await waitFor(sent, count: 2)
+        XCTAssertEqual(sent.results.first?["error"] as? String, "permission_required:calendar")
+        bridge.connectionsProvider = { PhoneConnections(calendar: .denied) }
+        await waitFor(sent, count: 3)                 // the manifest after the prompt
+        XCTAssertEqual(sent.manifests.count, 2)
+        XCTAssertEqual((sent.manifests.last?["connections"] as? [String: String])?["calendar"], "denied")
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(sent.results.count, 1, "no late result after a denied prompt")
+        XCTAssertEqual(runs.value, 0)
+        // Name free again.
+        call(bridge, id: "x2", name: "phone.calendar")
+        await waitFor(sent, count: 4)
+        XCTAssertEqual(sent.results.last?["id"] as? String, "x2")
+        XCTAssertEqual(sent.results.last?["error"] as? String, "permission_required:calendar")
+        XCTAssertEqual(sent.results.last?["permissionState"] as? String, "denied")
+    }
+
+    func testDisconnectDuringThePromptSendsNothingLater() async {
+        let runs = Counter()
+        let cal = FakeTool(name: "calendar", permissionKind: "calendar", body: { _ in runs.bump(); return "x" })
+        let (bridge, sent) = makeBridge([cal], connections: PhoneConnections(calendar: .unknown))
+        let prompt = Gate()
+        bridge.permissionRequester = { _ in await prompt.wait(); return true }
+        bridge.sessionDidConnect()
+        await waitFor(sent, count: 1)
+        call(bridge, id: "z1", name: "phone.calendar")
+        await waitFor(sent, count: 2)
+        bridge.sessionDidDisconnect()
+        prompt.open()
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(sent.payloads.count, 2, "no manifest, no late result on a closed socket")
+        XCTAssertEqual(runs.value, 0)
+    }
+
+    final class Counter: @unchecked Sendable {
+        private(set) var value = 0
+        func bump() { value += 1 }
     }
 
     // MARK: - Disconnect cancels in flight

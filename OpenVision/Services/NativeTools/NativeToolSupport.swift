@@ -3,6 +3,24 @@
 
 import Foundation
 import UserNotifications
+import UIKit
+
+/// AUR-837: the app's foreground state as the wire spells it (`aurelia.tool_result.appState`).
+/// iOS drops general-pasteboard writes from a non-foreground app and parks permission prompts
+/// until the app is in front — so every tool result says which state it ran in.
+enum AppForegroundState: String, Equatable {
+    case active, background, inactive
+
+    /// The real state; main-actor because `UIApplication.shared` is.
+    @MainActor static func current() -> AppForegroundState {
+        switch UIApplication.shared.applicationState {
+        case .active: return .active
+        case .background: return .background
+        case .inactive: return .inactive
+        @unknown default: return .inactive
+        }
+    }
+}
 
 /// The user utterance that triggered the current model turn. Backends set it before invoking
 /// their model so the registry can sanity-check tool args against what the user actually said
