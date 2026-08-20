@@ -21,4 +21,14 @@ final class LiveEyePlanTests: XCTestCase {
         // A stray stream flag with no connected device still means the phone (startStreaming would refuse).
         XCTAssertEqual(LiveEyePlan.decide(requested: true, glassesAvailable: false, glassesStreaming: true), .phone)
     }
+
+    /// AUR-742: the in-call pick "Phone" wins over paired glasses; "Off" still wins over everything.
+    func testPreferPhoneOverridesGlassesOnlyWhenRequested() {
+        XCTAssertEqual(LiveEyePlan.decide(requested: true, glassesAvailable: true, glassesStreaming: true, preferPhone: true), .phone)
+        XCTAssertEqual(LiveEyePlan.decide(requested: true, glassesAvailable: true, glassesStreaming: false, preferPhone: true), .phone)
+        XCTAssertEqual(LiveEyePlan.decide(requested: false, glassesAvailable: true, glassesStreaming: false, preferPhone: true), .off)
+        // Default keeps the glasses-first rule.
+        XCTAssertEqual(LiveEyePlan.decide(requested: true, glassesAvailable: true, glassesStreaming: false, preferPhone: false),
+                       .glasses(startStream: true))
+    }
 }

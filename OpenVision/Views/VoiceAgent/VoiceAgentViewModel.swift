@@ -88,8 +88,24 @@ final class VoiceAgentViewModel: ObservableObject {
     /// it stops the glasses stream (LED off) and/or the phone camera.
     @Published private(set) var cameraRequested = false
     /// When `cameraRequested` last changed (AUR-776b: dedupe the brain's eye.on/off against a
-    /// local phrase toggle for the same utterance).
+    /// local toggle for the same moment).
     private(set) var cameraRequestedChangedAt: Date = .distantPast
+    /// AUR-742: the wearer picked the PHONE camera explicitly for THIS call (Settings → Camera =
+    /// Phone at call start, or the in-call picker) — the phone serves even with glasses paired.
+    /// Reset per call; the default stays glasses-first.
+    @Published private(set) var preferPhoneEye = false
+    /// AUR-742: the in-call camera pick as a three-way value (Off / Phone / Glasses) for the UI.
+    var liveCameraChoice: CameraSourcePreference {
+        guard cameraRequested else { return .off }
+        return preferPhoneEye ? .phone : .glasses
+    }
+    /// AUR-742 §3.5: show the one-time "now just say «Аурелия» and talk" note.
+    @Published var showOneConversationNote = false
+    /// The exact §3.5 text (Russian; Margo's and Anton's rigs are ru-RU).
+    static let oneConversationNote = "Теперь просто скажи \"Аурелия\" и говори — перебивать можно в любой момент. Команды \"включи видео\" и \"стоп\" больше не нужны."
+    /// AUR-742 / memo §1.6: heavy-lane tasks the brain reports as running or queued for this
+    /// session (`aurelia.task.*`) — the "N running" pill. Mirrors `OpenAIRealtimeService.runningTasks`.
+    var runningTaskCount: Int { openAIRealtime.runningTasks.count }
     /// True when voice recognition is ready (audio engine running)
     @Published var isVoiceReady = false
     /// True while a POV demo recording (glasses video + mic audio) is in progress.
@@ -127,6 +143,16 @@ final class VoiceAgentViewModel: ObservableObject {
     private var cameraSourceWatch: Set<AnyCancellable> = []
     /// The camera refusal is stated once per session, not once per frame.
     private var phoneCameraDeniedAnnounced = false
+
+    /// AUR-742: the live conversation ends after `settings.conversationTimeout` seconds of
+    /// silence — nobody talking, nothing playing, no recording, no delegated task — back to the
+    /// wake word. Polled once a second while live; `lastLiveActivityAt` is bumped by every sign
+    /// of life (transcripts, turns, actions, camera taps, reconnects).
+    private var liveIdleTimer: Timer?
+    private var lastLiveActivityAt = Date()
+    private var realtimeWatch: Set<AnyCancellable> = []
+    /// AUR-743 latency log: when the wake word fired (nil = the call was opened by tap).
+    private var wakeDetectedAt: Date?
 
     // MARK: - Agent State
 
@@ -169,6 +195,7 @@ final class VoiceAgentViewModel: ObservableObject {
     func onAppear() {
         setupVoiceCommandService()
         setupGlassesCallbacks()
+        setupRealtimeObservers()
         preloadLocalModelIfNeeded()
         // Resume wake-word listening when returning to this screen. onDisappear stops it
         // (e.g. when navigating to Settings), and the one-time .task doesn't re-run on return —
@@ -176,6 +203,34 @@ final class VoiceAgentViewModel: ObservableObject {
         if voiceCommandService.authorizationStatus == .authorized && !voiceCommandService.isListening {
             startWakeWordListening()
         }
+        // AUR-742 §3.5 step 2: one-time note for an upgraded, configured device (Margo's rig):
+        // the conversation is the only mode now. Shown once, recorded in settings.
+        if !settingsManager.settings.oneConversationNoteSeen,
+           !settingsManager.settings.pushToAskEnabled, canStartTalkMode {
+            showOneConversationNote = true
+        }
+    }
+
+    /// The §3.5 note was read.
+    func markOneConversationNoteSeen() {
+        showOneConversationNote = false
+        settingsManager.settings.oneConversationNoteSeen = true
+    }
+
+    /// AUR-742: signs of life on the realtime socket feed the idle timer (the VM has no hook on
+    /// `speech_started`; the service's published flags flip there). Installed once.
+    private func setupRealtimeObservers() {
+        guard realtimeWatch.isEmpty else { return }
+        openAIRealtime.$isProcessing.removeDuplicates().filter { $0 }
+            .sink { [weak self] _ in self?.noteLiveActivity() }.store(in: &realtimeWatch)
+        openAIRealtime.$isModelSpeaking.removeDuplicates().filter { $0 }
+            .sink { [weak self] _ in self?.noteLiveActivity() }.store(in: &realtimeWatch)
+        openAIRealtime.$runningTasks.removeDuplicates()
+            .sink { [weak self] tasks in
+                self?.noteLiveActivity()
+                self?.objectWillChange.send()   // `runningTaskCount` is derived — re-render the pill
+                if !tasks.isEmpty { ovLog("[VoiceAgent] Heavy-lane tasks: \(tasks.count) — \(tasks.values.sorted().joined(separator: " · "))") }
+            }.store(in: &realtimeWatch)
     }
 
     func onDisappear() {
@@ -187,13 +242,7 @@ final class VoiceAgentViewModel: ObservableObject {
     func ttsSpeakingChanged(_ isSpeaking: Bool) {
         if isSpeaking {
             agentState = .speaking
-            // Pause barge-in detection while TTS is playing
-            // (prevents microphone picking up TTS and triggering interruption)
-            voiceCommandService.isBargeInPaused = true
         } else {
-            // Resume barge-in detection
-            voiceCommandService.isBargeInPaused = false
-
             if isSessionActive {
                 agentState = .listening
                 resumeListeningAfterSpeaking()
@@ -210,9 +259,7 @@ final class VoiceAgentViewModel: ObservableObject {
     func kokoroSpeakingChanged(_ speaking: Bool) {
         if speaking {
             agentState = .speaking
-            voiceCommandService.isBargeInPaused = true
         } else {
-            voiceCommandService.isBargeInPaused = false
             if isSessionActive {
                 agentState = .listening
                 resumeListeningAfterSpeaking()
@@ -235,15 +282,16 @@ final class VoiceAgentViewModel: ObservableObject {
         ovLog("[VoiceAgent] VoiceCommandService state changed to: \(newState)")
         switch newState {
         case .idle:
-            // In live video mode, a silence timeout must NOT end the mode — the user expects
-            // to keep asking questions (camera stays on) until they say "stop video". Re-arm
-            // conversation mode so the next question is heard without a fresh wake word.
-            if isLiveVideoMode {
-                ovLog("[VoiceAgent] Idle during live video — re-arming conversation mode")
+            // LOCAL live video (SmolVLM2, push-to-ask machinery — AUR-744): a silence timeout must
+            // NOT end the mode; re-arm conversation mode so the next question is heard without a
+            // fresh wake word. The realtime conversation owns its own mic — nothing to re-arm.
+            if isLiveVideoMode, activeLiveService == nil, settingsManager.settings.pushToAskEnabled {
+                ovLog("[VoiceAgent] Idle during local live video — re-arming conversation mode")
                 voiceCommandService.enterConversationMode()
                 agentState = .liveVideo
                 return
             }
+            if isLiveVideoMode { return }
             // A real conversation end is the recognizer going idle *while we were listening*
             // for the user (silence timeout). An .idle in any other state (.connecting startup,
             // .thinking/.toolRunning command processing, .speaking a reply) is a transient from
@@ -295,6 +343,12 @@ final class VoiceAgentViewModel: ObservableObject {
     // MARK: - Session lifecycle
 
     func toggleSession() {
+        // AUR-742: ONE conversation. Without the push-to-ask flag every "start" is the realtime
+        // conversation — orb tap, long press, wake word, the button: all the same door.
+        guard settingsManager.settings.pushToAskEnabled else {
+            toggleTalkMode()
+            return
+        }
         if isSessionActive {
             stopSession()
         } else {
@@ -302,7 +356,15 @@ final class VoiceAgentViewModel: ObservableObject {
         }
     }
 
+    /// Start a session. One-conversation mode (default): opens the realtime WS conversation —
+    /// the same path `toggleTalkMode()` takes. Push-to-ask (AUR-744, flag on): the banked
+    /// wake-word → Apple STT → `/v1/chat/completions` → per-sentence TTS loop below.
     func startSession() {
+        guard settingsManager.settings.pushToAskEnabled else {
+            Task { @MainActor in await startLiveVideoMode() }
+            return
+        }
+
         // Check configuration
         guard settingsManager.settings.isCurrentBackendConfigured else {
             errorMessage = "Please configure \(settingsManager.settings.aiBackend.displayName) in Settings"
@@ -491,37 +553,6 @@ final class VoiceAgentViewModel: ObservableObject {
         audioCapture.inputGain = routeTag.hasSuffix("phone-mic") ? AudioCaptureService.phoneMicGain : 1
     }
 
-    /// Full stop for "Ok Vision stop": silence all output, cancel any in-flight generation, and go
-    /// quiet back to wake-word listening. The recognizer buffer is already reset by
-    /// VoiceCommandService (so the stale transcript can't re-fire); here we just halt + end the turn.
-    private func performFullStop() {
-        ttsService.stop()
-        KokoroTTSService.shared.stop()
-        audioPlayback.stop()
-        ttsStreaming = false
-
-        Task {
-            switch settingsManager.settings.aiBackend {
-            case .openClaw: await OpenClawService.shared.interrupt()
-            case .geminiLive: await GeminiLiveService.shared.interrupt()
-            case .openAI: break   // single request/response — nothing to interrupt
-            case .appleFoundation: AppleFoundationService.shared.interrupt()
-            case .localGemma: GemmaLocalService.shared.interrupt()
-            }
-        }
-
-        if isLiveVideoMode {
-            Task { await stopLiveVideoMode() }
-        }
-
-        // Go quiet: end the turn, return to wake-word idle. Say "Ok Vision" to start again.
-        userTranscript = ""
-        aiTranscript = ""
-        currentToolName = nil
-        isSessionActive = false
-        agentState = .idle
-    }
-
     // MARK: - Voice Command Setup
 
     /// Warm up the on-device model in the background so the FIRST "Ok Vision" is instant
@@ -590,32 +621,29 @@ final class VoiceAgentViewModel: ObservableObject {
                 self.agentState = .listening
             }
 
-            // AUR-742a: the wake word is the DOOR TO THE CONVERSATION, not to push-to-ask.
-            // «Аурелия» now opens the same audio-only realtime session the orb tap opens (camera
-            // off, no «включи видео» needed). Push-to-ask survives only behind the long-press and
-            // its own button, and as the fallback when no realtime backend is configured.
-            // Known gap, deliberate: speech in the SAME breath as the wake word is dropped —
-            // the session needs ~1 s to come up. The 2 s pre-roll that fixes it is AUR-743.
+            // AUR-742: the wake word is the DOOR TO THE CONVERSATION. «Аурелия» opens the same
+            // audio-only realtime session the orb tap opens (camera per Settings → Camera, no
+            // «включи видео» needed). Speech in the same breath rides the AUR-743 pre-roll.
+            // Push-to-ask (AUR-744) is reachable here ONLY with its flag on, as the fallback when
+            // no realtime backend is configured.
+            self.wakeDetectedAt = Date()
             Task { @MainActor in
                 if self.isLiveVideoMode || self.isSessionActive { return }
                 if self.canStartTalkMode {
-                    ovLog("[VoiceAgent] Wake word → opening the realtime conversation (audio-only)")
+                    ovLog("[VoiceAgent] Wake word → opening the realtime conversation")
                     await self.startLiveVideoMode()
-                } else if self.settingsManager.settings.isCurrentBackendConfigured {
-                    ovLog("[VoiceAgent] Wake word → push-to-ask (no realtime backend configured)")
+                } else if self.settingsManager.settings.pushToAskEnabled,
+                          self.settingsManager.settings.isCurrentBackendConfigured {
+                    ovLog("[VoiceAgent] Wake word → push-to-ask (flag on, no realtime backend configured)")
                     self.startSession()
+                } else {
+                    self.errorMessage = "Set the OpenAI backend's Endpoint and API Key in Settings to talk"
+                    ovLog("[VoiceAgent] Wake word ignored — no realtime backend configured")
                 }
             }
         }
 
-        // "Ok Vision stop" during a reply → full stop, go quiet (the recognizer is already reset
-        // to wake-word idle by VoiceCommandService; here we just halt output + end the turn).
-        voiceCommandService.onStopCommand = { [weak self] in
-            ovLog("[VoiceAgent] Full stop requested")
-            self?.performFullStop()
-        }
-
-        // Command captured
+        // Command captured (push-to-ask only, AUR-744)
         voiceCommandService.onCommandCaptured = { [weak self] (command: String) in
             guard let self else { return }
             ovLog("[VoiceAgent] Command captured: \(command)")
@@ -640,33 +668,7 @@ final class VoiceAgentViewModel: ObservableObject {
             }
         }
 
-        // Barge-in (user interrupts AI)
-        voiceCommandService.onInterruption = { [weak self] in
-            guard let self else { return }
-            ovLog("[VoiceAgent] Barge-in detected")
-
-            // Stop TTS immediately
-            self.ttsService.stop()
-            KokoroTTSService.shared.stop()
-
-            // Stop current AI response
-            Task {
-                switch self.settingsManager.settings.aiBackend {
-                case .openClaw:
-                    await OpenClawService.shared.interrupt()
-                case .geminiLive:
-                    await GeminiLiveService.shared.interrupt()
-                case .openAI:
-                    break   // single request/response — nothing to interrupt
-                case .appleFoundation:
-                    AppleFoundationService.shared.interrupt()
-                case .localGemma:
-                    GemmaLocalService.shared.interrupt()
-                }
-            }
-        }
-
-        // Conversation timeout (user didn't speak after AI response)
+        // Conversation timeout (push-to-ask: user didn't speak after the AI response)
         voiceCommandService.onConversationTimeout = { [weak self] in
             guard let self else { return }
             // In live video mode, silence must not end the session — the .idle state handler
@@ -819,55 +821,20 @@ final class VoiceAgentViewModel: ObservableObject {
 
     // MARK: - Command routing
 
-    /// Send command to AI backend
+    /// The push-to-ask ask router (AUR-744, flag on): a captured STT command → the selected HTTP /
+    /// on-device backend. AUR-742 removed every MODE word from here — no start/stop-video lists,
+    /// no stop keywords: the conversation is entered by tap or wake word, the camera is a toggle,
+    /// stop words are the server's. With the flag off nothing reaches this (the wake-word door
+    /// never captures a command), and it returns at once.
     private func sendCommand(_ command: String) async {
+        guard settingsManager.settings.pushToAskEnabled else {
+            ovLog("[VoiceAgent] sendCommand ignored — push-to-ask is off")
+            return
+        }
         let lowerCommand = command.lowercased()
 
-        // Check for "stop" command - stops TTS and waits for next command
-        let stopKeywords = ["stop", "be quiet", "shut up", "silence", "quiet", "enough", "ok stop", "okay stop",
-                            // ru-RU STT hears Cyrillic — Russian stop words (Margo, 2026-08-16)
-                            "стоп", "хватит", "замолчи", "тихо", "остановись", "перестань", "прекрати", "молчи", "достаточно"]
-        let isStopCommand = stopKeywords.contains { lowerCommand.contains($0) } &&
-                           !lowerCommand.contains("video") && !lowerCommand.contains("stream")
-                           && !lowerCommand.contains("видео") && !lowerCommand.contains("стрим")
-
-        if isStopCommand {
-            ovLog("[VoiceAgent] Stop command detected - full stop")
-            performFullStop()
-            return
-        }
-
-        // Check for live video mode commands
-        let startLiveKeywords = ["start video stream", "start live video", "start video", "start streaming",
-                                 "enable video", "live mode", "go live", "video mode",
-                                 // ru-RU STT (Apple) transcribes Cyrillic — accept Russian equivalents.
-                                 "начни видео", "включи видео", "запусти видео", "старт видео", "видео режим",
-                                 "лайв режим", "живой режим", "видео стрим", "включи стрим", "начни стрим"]
-
-        let isStartLiveCommand = startLiveKeywords.contains { lowerCommand.contains($0) }
-        // Fuzzy stop match: any "video"/"stream" phrase with a stop-like word. Tolerates Apple STT
-        // dropping the leading 's' ("stop video" → "top video"), which previously sailed past the
-        // exact-keyword list and got sent to the model as a question instead of ending the mode.
-        let mentionsVideo = lowerCommand.contains("video") || lowerCommand.contains("stream")
-            || lowerCommand.contains("видео") || lowerCommand.contains("стрим")
-        let stopWords = ["stop", "top ", "end ", "exit", "disable", "close", "quit", "turn off",
-                         "стоп", "останови", "выключи", "заверши", "закрой", "хватит"]
-        let isStopLiveCommand = mentionsVideo && stopWords.contains { lowerCommand.contains($0) }
-
-        // Handle live video mode commands
-        if isStartLiveCommand {
-            ovLog("[VoiceAgent] Starting live video mode...")
-            await startLiveVideoMode()
-            return
-        }
-
-        if isStopLiveCommand {
-            ovLog("[VoiceAgent] Stopping live video mode...")
-            await stopLiveVideoMode()
-            return
-        }
-
-        // If in live video mode, route by which live backend is driving it.
+        // Local live video (SmolVLM2): STT is the input path, so every question lands here —
+        // answer it against the latest glasses frame.
         if isLiveVideoMode {
             if activeLiveService == nil {
                 // Local (SmolVLM2) live mode: STT is the input path, so every command lands here.
@@ -966,7 +933,9 @@ final class VoiceAgentViewModel: ObservableObject {
         // Fully on-device live video: with SmolVLM2 loaded as the local backend, keep the glasses
         // camera streaming and answer each spoken question against the latest frame. No cloud,
         // no WebSocket — Apple STT keeps listening and the reply is spoken via the selected TTS.
-        if settingsManager.settings.aiBackend == .localGemma && GemmaLocalService.shared.visionReady {
+        // It IS the push-to-ask loop with a camera, so it lives behind the AUR-744 flag.
+        if settingsManager.settings.aiBackend == .localGemma && GemmaLocalService.shared.visionReady
+            && settingsManager.settings.pushToAskEnabled {
             await startLocalLiveVideoMode()
             return
         }
@@ -1132,6 +1101,7 @@ final class VoiceAgentViewModel: ObservableObject {
             realtime.onAction = { [weak self, weak realtime] action in
                 Task { @MainActor in
                     guard let self else { return }
+                    self.noteLiveActivity()
                     let ack = await self.voiceActions.perform(action)
                     realtime?.sendActionAck(ack)
                     // AUR-787: right after the ack, upload the captured JPEG itself so the
@@ -1175,14 +1145,66 @@ final class VoiceAgentViewModel: ObservableObject {
         // nothing (measured on the phone rig 2026-08-17 — `/admin/rt-sessions` showed the live
         // ru-RU session answering with 0 `vision:` lines).
         phoneCameraDeniedAnnounced = false
-        // AUDIO-ONLY entry (principal rulings 2026-08-17 phone / 2026-08-18 glasses, AUR-757):
-        // BOTH eyes stay shut until asked for.
-        cameraRequested = false
+        // AUDIO-first entry (principal rulings 2026-08-17 phone / 2026-08-18 glasses, AUR-757):
+        // BOTH eyes stay shut until asked for — unless Settings → Camera says otherwise (AUR-742:
+        // the camera is a persisted toggle, never a phrase). Per-call pick starts from it.
+        let startEye = settingsManager.settings.cameraSource
+        preferPhoneEye = startEye == .phone
+        cameraRequested = startEye != .off
+        cameraRequestedChangedAt = Date()
         await updateLiveCameraSource()
         watchCameraSource()
 
-        ovLog("[VoiceAgent] ✓ Live video mode active - \(label) handling audio + video")
+        // AUR-742: the silence auto-end (Settings → Conversation) — polled while live.
+        startLiveIdleTimer()
+
+        if let wakeAt = wakeDetectedAt {
+            ovLog("[VoiceAgent] ⏱ wake → conversation up: \(Int(Date().timeIntervalSince(wakeAt) * 1000)) ms (AUR-743 wake-open)")
+            wakeDetectedAt = nil
+        }
+        ovLog("[VoiceAgent] ✓ Live video mode active - \(label) handling audio + video (eye at start: \(startEye.rawValue))")
         // AUR-773: no spoken announcement — the START earcon above is the cue.
+    }
+
+    // MARK: - Silence auto-end (AUR-742)
+
+    /// Any sign of life in the conversation: transcripts, turns, actions, camera taps, reconnects.
+    func noteLiveActivity() {
+        lastLiveActivityAt = Date()
+    }
+
+    private func startLiveIdleTimer() {
+        liveIdleTimer?.invalidate()
+        lastLiveActivityAt = Date()
+        liveIdleTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.liveIdleTick() }
+        }
+    }
+
+    private func stopLiveIdleTimer() {
+        liveIdleTimer?.invalidate()
+        liveIdleTimer = nil
+    }
+
+    /// End the conversation after `conversationTimeout` seconds with nothing going on. Busy =
+    /// she is speaking (or her reply is still in the ear), a recording or listen session runs, a
+    /// heavy-lane task is running/queued, or the socket is mid-reconnect (AUR-728 hiccup).
+    /// 0 = never. Only the realtime conversation is timed here; local live video has its own loop.
+    private func liveIdleTick() {
+        guard isLiveVideoMode, activeLiveService != nil else { return }
+        let limit = settingsManager.settings.conversationTimeout
+        guard limit > 0 else { return }
+        let busy = openAIRealtime.isModelSpeaking
+            || audioPlayback.pendingMs > 0
+            || voiceActions.isRecordingAnything
+            || runningTaskCount > 0
+            || openAIRealtime.connectionState.isAttempting
+        if busy { lastLiveActivityAt = Date(); return }
+        let idle = Date().timeIntervalSince(lastLiveActivityAt)
+        guard idle >= limit else { return }
+        ovLog("[VoiceAgent] Silence for \(Int(idle)) s ≥ \(Int(limit)) s — ending the conversation (back to the wake word)")
+        stopLiveIdleTimer()
+        Task { @MainActor in await stopLiveVideoMode() }
     }
 
     /// Resolve which live-video backend to use, or nil if none is configured.
@@ -1293,6 +1315,8 @@ final class VoiceAgentViewModel: ObservableObject {
         // already heard the conversation end, in the call's own route — no second announcement.
         let serverSaidGoodbye = (activeLiveService as? OpenAIRealtimeService)?.endedAfterFarewell == true
 
+        stopLiveIdleTimer()
+
         // AUR-776: a voice-action recording (video / listen) ends with the call — finalise + save
         // BEFORE the glasses stream and the mic go down, then lift the local mute.
         await voiceActions.sessionEnded()
@@ -1307,6 +1331,7 @@ final class VoiceAgentViewModel: ObservableObject {
         cameraSourceWatch.removeAll()
         phoneCamera.stop()
         cameraRequested = false
+        preferPhoneEye = false
         liveCameraSource = .none
 
         // Stop audio playback (AUR-723). On the End pill this cuts a reply mid-word, by design;
@@ -1424,7 +1449,8 @@ final class VoiceAgentViewModel: ObservableObject {
         // The pure decision lives in `LiveEyePlan` (unit-tested); this is the side-effect half.
         switch LiveEyePlan.decide(requested: cameraRequested,
                                   glassesAvailable: glassesEyeAvailable,
-                                  glassesStreaming: glassesManager.isStreaming) {
+                                  glassesStreaming: glassesManager.isStreaming,
+                                  preferPhone: preferPhoneEye) {
         case .off:
             // No explicit request → no eye. A session that opened audio-only stays audio-only
             // (AUR-742a phone, AUR-757 glasses).
@@ -1506,34 +1532,36 @@ final class VoiceAgentViewModel: ObservableObject {
     /// (AUR-757); "shut the eye" stops whichever one is running.
     func setLiveCamera(_ on: Bool) {
         guard isLiveVideoMode else { return }
+        noteLiveActivity()
         guard cameraRequested != on else { return }
         cameraRequested = on
         cameraRequestedChangedAt = Date()
-        ovLog("[VoiceAgent] Camera \(on ? "requested" : "dismissed") by the wearer (glasses available: \(glassesEyeAvailable))")
+        ovLog("[VoiceAgent] Camera \(on ? "requested" : "dismissed") by the wearer (glasses available: \(glassesEyeAvailable), prefer phone: \(preferPhoneEye))")
         Task { @MainActor in await updateLiveCameraSource() }
     }
 
     func toggleLiveCamera() { setLiveCamera(!cameraRequested) }
 
-    /// Inside a session «включи камеру/видео» and «выключи камеру/видео» toggle the EYE, they no
-    /// longer switch modes — the conversation itself is entered by tap or wake word (AUR-742a).
-    /// Returns true when the utterance was a camera command (so it is not treated as a question).
-    @discardableResult
-    private func handleCameraCommand(_ text: String) -> Bool {
-        let t = text.lowercased()
-        // AUR-776: CAMERA words only. "video" words («включи видео» / "start video" / "stop
-        // video") now mean RECORDING and are the brain's call (`aurelia.action video.start/stop`),
-        // so they are no longer interpreted here — three camera modes: eye-only (these phrases),
-        // video.silent, video.assist (recording + this same eye).
-        let off = ["выключи камеру", "останови камеру", "стоп камера", "стоп камеру", "убери камеру",
-                   "закрой камеру", "camera off", "turn off camera", "stop camera", "stop the camera",
-                   "close camera", "close the camera"]
-        let on = ["включи камеру", "покажи камеру", "открой камеру",
-                  "camera on", "turn on camera", "start camera", "show camera", "open camera",
-                  "open the camera"]
-        if off.contains(where: { t.contains($0) }) { setLiveCamera(false); return true }
-        if on.contains(where: { t.contains($0) }) { setLiveCamera(true); return true }
-        return false
+    /// AUR-742: the in-call three-way camera pick — Off / Phone / Glasses — for THIS call. The
+    /// camera is a toggle inside the session, never a phrase: «смотри» / "look" reach the brain
+    /// as speech and come back as `eye.on` (runbook §10); the button is the hands-on equivalent.
+    /// Glasses picked with none available falls through to the phone (LiveEyePlan).
+    func selectLiveCamera(_ choice: CameraSourcePreference) {
+        guard isLiveVideoMode else { return }
+        noteLiveActivity()
+        switch choice {
+        case .off:
+            setLiveCamera(false)
+        case .phone, .glasses:
+            let wantPhone = choice == .phone
+            let changed = preferPhoneEye != wantPhone || !cameraRequested
+            preferPhoneEye = wantPhone
+            guard changed else { return }
+            cameraRequested = true
+            cameraRequestedChangedAt = Date()
+            ovLog("[VoiceAgent] Camera → \(choice.rawValue) picked by the wearer (glasses available: \(glassesEyeAvailable))")
+            Task { @MainActor in await updateLiveCameraSource() }
+        }
     }
 
     /// Follow glasses registration/connection/streaming while live so a REQUESTED eye switches
@@ -1563,44 +1591,30 @@ final class VoiceAgentViewModel: ObservableObject {
             self?.audioPlayback.playAudio(data: data)
         }
 
-        // Transcription updates - also check for stop commands
+        // Transcription updates. AUR-742: NOTHING is matched here any more — no camera phrases,
+        // no stop-live list, no Hindi fallbacks. What the wearer says is speech for the brain:
+        // the eye is `aurelia.action eye.on/off`, a recording stop is `video.stop`, hang-up is
+        // `aurelia.session.close` (AUR-746) — all SERVER-owned. "How do I stop a nosebleed" is
+        // answered, not obeyed.
         service.onInputTranscription = { [weak self] text in
             Task { @MainActor in
                 guard let self else { return }
                 self.userTranscript = text
-
-                // AUR-742a: inside a live session these phrases toggle the CAMERA, not the mode.
-                if self.isLiveVideoMode, self.handleCameraCommand(text) { return }
-
-                // Check for stop video commands in what the user said
-                let lowerText = text.lowercased()
-                // AUR-776: "stop video" / «стоп видео» are NOT hang-ups any more — the brain maps
-                // them to `aurelia.action video.stop` (a recording stop); hang-up by voice is the
-                // brain's `aurelia.session.close` (AUR-746). Only the explicit "live/stream" words
-                // stay as a local fallback.
-                let stopKeywords = ["stop streaming", "stop live", "end live", "exit live",
-                                   "стоп стрим", "выключи стрим", "заверши стрим",
-                                   // Hindi fallbacks (models sometimes transcribe English as Hindi)
-                                   "स्टॉप", "बंद करो", "रुको"]
-
-                let isStopCommand = stopKeywords.contains { lowerText.contains($0) }
-
-                if isStopCommand && self.isLiveVideoMode {
-                    ovLog("[VoiceAgent] Stop command detected in transcription: \(text)")
-                    await self.stopLiveVideoMode()
-                }
+                self.noteLiveActivity()
             }
         }
 
         service.onOutputTranscription = { [weak self] text in
             Task { @MainActor in
                 self?.aiTranscript = text
+                self?.noteLiveActivity()
             }
         }
 
         // Turn complete
         service.onTurnComplete = { [weak self] in
             Task { @MainActor in
+                self?.noteLiveActivity()
                 // History: persist this live-video exchange (transcript only, no frames).
                 self?.recordLiveTurn()
             }
@@ -2214,7 +2228,7 @@ final class VoiceAgentViewModel: ObservableObject {
                 completion("Failed to capture photo.")
             }
         } else {
-            completion("Camera is not available. Please connect glasses and start streaming first, or say 'start video stream' for live mode.")
+            completion("Camera is not available. Please connect glasses and start streaming first, or open the camera inside the conversation.")
         }
     }
 }

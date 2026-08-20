@@ -90,6 +90,13 @@ struct VoiceAgentView: View {
         .task {
             await viewModel.requestSpeechAuthorization()
         }
+        // AUR-742 §3.5: the one-time "now just say «Аурелия» and talk" note (Russian — the
+        // configured rigs are ru-RU).
+        .alert("Аурелия", isPresented: $viewModel.showOneConversationNote) {
+            Button("Понятно") { viewModel.markOneConversationNoteSeen() }
+        } message: {
+            Text(VoiceAgentViewModel.oneConversationNote)
+        }
         // Observe TTS state changes
         .onChange(of: ttsService.isSpeaking) { isSpeaking in
             viewModel.ttsSpeakingChanged(isSpeaking)
@@ -173,6 +180,23 @@ struct VoiceAgentView: View {
                     .background(Capsule().fill(Color.purple.opacity(0.75)))
                     .padding(.leading, 6)
                     .accessibilityLabel("Voice model: \(VoiceModelChoices.shared.displayName(for: model))")
+                }
+
+                // AUR-742 / memo §1.6: heavy-lane tasks in flight ("N running"). The spoken
+                // channel carries the meaning; this is the glance.
+                if viewModel.runningTaskCount > 0 {
+                    HStack(spacing: 4) {
+                        Image(systemName: "gearshape.2.fill")
+                            .font(.caption2)
+                        Text("\(viewModel.runningTaskCount) running")
+                            .font(.caption2.bold())
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(Color.orange.opacity(0.8)))
+                    .padding(.leading, 6)
+                    .accessibilityLabel("\(viewModel.runningTaskCount) tasks running")
                 }
             } else {
                 StatusPill(
@@ -276,9 +300,12 @@ struct VoiceAgentView: View {
                                 Text("Say \"\(settingsManager.settings.wakeWord)\" or tap to talk")
                                     .font(.subheadline)
                                     .foregroundColor(Theme.textSecondary)
-                                Text("Long-press the orb for push-to-ask")
-                                    .font(.caption2)
-                                    .foregroundColor(Theme.textSecondary.opacity(0.7))
+                                // AUR-744: the banked path is only advertised while its flag is on.
+                                if settingsManager.settings.pushToAskEnabled {
+                                    Text("Long-press the orb for push-to-ask")
+                                        .font(.caption2)
+                                        .foregroundColor(Theme.textSecondary.opacity(0.7))
+                                }
                             }
                         } else {
                             HStack(spacing: 8) {
@@ -295,12 +322,15 @@ struct VoiceAgentView: View {
 
             // The assistant identity: swirling emerald orb (tap to start/stop a session)
             SwirlOrb(mode: orbMode, size: 250)
-                // AUR-742a: ONE TAP opens the realtime conversation (no «включи видео» needed).
-                // Push-to-ask — Margo's fallback until AUR-744 — moves to a long press.
+                // AUR-742: ONE TAP opens the realtime conversation (no «включи видео» needed).
+                // The long press is the same door — unless the banked push-to-ask flag is on
+                // (AUR-744), when it opens that path instead (`toggleSession` routes by the flag).
                 .onTapGesture { viewModel.toggleTalkMode() }
                 .onLongPressGesture(minimumDuration: 0.6) { viewModel.toggleSession() }
                 .accessibilityLabel(viewModel.isLiveVideoMode ? "End the conversation" : "Start the conversation")
-                .accessibilityHint("Double tap to talk. Touch and hold for push-to-ask.")
+                .accessibilityHint(settingsManager.settings.pushToAskEnabled
+                                   ? "Double tap to talk. Touch and hold for push-to-ask."
+                                   : "Double tap to talk.")
 
             // Explicit entry next to the orb, so the conversation is discoverable without
             // knowing that the orb is tappable.
@@ -326,10 +356,21 @@ struct VoiceAgentView: View {
                 .opacity(viewModel.canStartTalkMode ? 1 : 0.4)
 
                 if viewModel.isLiveVideoMode {
-                    // AUR-742a/AUR-757: the eye is opt-in inside the conversation — BOTH eyes.
-                    // The toggle opens the glasses camera when they are there, the phone otherwise.
-                    Button {
-                        viewModel.toggleLiveCamera()
+                    // AUR-742/AUR-757: the eye is a TOGGLE inside the conversation, never a phrase.
+                    // Tap = on/off (glasses when there, phone otherwise); hold = pick Off / Phone /
+                    // Glasses for this call.
+                    Menu {
+                        ForEach(CameraSourcePreference.allCases) { choice in
+                            Button {
+                                viewModel.selectLiveCamera(choice)
+                            } label: {
+                                if viewModel.liveCameraChoice == choice {
+                                    Label(choice.displayName, systemImage: "checkmark")
+                                } else {
+                                    Text(choice.displayName)
+                                }
+                            }
+                        }
                     } label: {
                         Image(systemName: viewModel.liveCameraSource == .none ? "video.slash.fill" : "video.fill")
                             .font(.title3)
@@ -339,13 +380,17 @@ struct VoiceAgentView: View {
                                 Circle().fill(viewModel.liveCameraSource == .none
                                               ? Color.white.opacity(0.15) : Theme.accent.opacity(0.9))
                             )
+                    } primaryAction: {
+                        viewModel.toggleLiveCamera()
                     }
                     .accessibilityLabel(viewModel.liveCameraSource == .none
                                         ? (viewModel.glassesEyeAvailable ? "Turn the glasses camera on" : "Turn the camera on")
                                         : "Turn the camera off")
+                    .accessibilityHint("Touch and hold to choose Off, Phone camera or Glasses.")
                 }
 
-                if !viewModel.isLiveVideoMode {
+                // AUR-744: the banked push-to-ask entry — only while its flag is on.
+                if !viewModel.isLiveVideoMode && settingsManager.settings.pushToAskEnabled {
                     Button {
                         viewModel.toggleSession()
                     } label: {

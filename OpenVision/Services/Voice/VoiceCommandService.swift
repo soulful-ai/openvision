@@ -5,14 +5,17 @@ import Foundation
 import Speech
 import AVFoundation
 
-/// Voice command service with wake word detection
+/// Voice command service — the wake-word DOOR to the conversation (AUR-742).
 ///
-/// Features:
-/// - Wake word detection ("Ok Vision")
-/// - Command capture after wake word
-/// - Silence detection to end command
-/// - Conversation mode (follow-ups without wake word)
-/// - Barge-in support
+/// In one-conversation mode (the default) this service does exactly one thing: listen for the
+/// wake word while the app is idle and fire `onWakeWordDetected`. The realtime session then owns
+/// the mic (`AudioCaptureService` → `/v1/realtime`), and NOTHING is scanned for phrases here —
+/// mode/action words are the SERVER's (`aurelia.action`), talking is the interrupt.
+///
+/// The push-to-ask machinery (command capture after the wake word, silence detection,
+/// conversation mode for follow-ups, the «Аурелия, …» barge-in over Apple TTS) is BANKED behind
+/// `AppSettings.pushToAskEnabled` (AUR-744) — it keeps compiling and comes back when the flag is
+/// flipped, for a rig that cannot do full duplex.
 @MainActor
 final class VoiceCommandService: ObservableObject {
     // MARK: - Singleton
@@ -56,30 +59,26 @@ final class VoiceCommandService: ObservableObject {
         SettingsManager.shared.settings.playActivationSound
     }
 
+    /// AUR-744: the banked push-to-ask path. Off (default) = this service is the wake-word door
+    /// only; on = command capture + conversation mode come back.
+    private var pushToAskEnabled: Bool {
+        SettingsManager.shared.settings.pushToAskEnabled
+    }
+
     // MARK: - Callbacks
 
     /// Called when wake word is detected
     var onWakeWordDetected: (() -> Void)?
 
-    /// Called when the user says a stop phrase ("stop", "ok vision stop") during TTS/processing.
-    /// The app should halt everything and go quiet; the recognizer is reset to wake-word idle here.
-    var onStopCommand: (() -> Void)?
-
-    /// Called when a command is captured
+    /// Called when a command is captured (push-to-ask only, AUR-744)
     var onCommandCaptured: ((String) -> Void)?
 
-    /// Called when user interrupts (barge-in)
-    var onInterruption: (() -> Void)?
-
-    /// Called when conversation mode times out (no speech detected)
+    /// Called when conversation mode times out (no speech detected) (push-to-ask only, AUR-744)
     var onConversationTimeout: (() -> Void)?
 
-    // MARK: - Barge-in Control
+    // MARK: - Barge-in Control (push-to-ask only, AUR-744)
 
-    /// When true, barge-in detection is paused (e.g., during TTS playback)
-    var isBargeInPaused: Bool = false
-
-    /// Returns true if TTS is currently playing (allows wake word to interrupt)
+    /// Returns true if TTS is currently playing (allows wake word + command to interrupt)
     var shouldAllowInterrupt: (() -> Bool)?
 
     // MARK: - Speech Recognition
@@ -340,8 +339,15 @@ final class VoiceCommandService: ObservableObject {
         print("[VoiceCommand] Stopped listening")
     }
 
-    /// Enter conversation mode (no wake word needed for follow-ups)
+    /// Enter conversation mode (no wake word needed for follow-ups). Push-to-ask only (AUR-744):
+    /// in one-conversation mode follow-ups go to the realtime session, so this falls back to the
+    /// plain wake-word door (recognizer relaunched, transcript cleared).
     func enterConversationMode() {
+        guard pushToAskEnabled else {
+            print("[VoiceCommand] enterConversationMode ignored — push-to-ask is off (wake-word door only)")
+            exitConversationMode()
+            return
+        }
         // Restart recognition to clear accumulated transcription
         restartRecognition()
 
@@ -528,23 +534,12 @@ final class VoiceCommandService: ObservableObject {
             }
 
         case .processing:
-            // Check for wake word to interrupt TTS (e.g., "ok vision stop")
+            // Push-to-ask only (AUR-744): a reply is being spoken by the phone's TTS; the wake word
+            // + a command interrupts it. (The old client-side stop-phrase matcher — "стоп",
+            // "хватит", the tail-of-transcript lists — is GONE with AUR-742: inside the realtime
+            // conversation talking IS the interrupt and stop words are the server's. It was also
+            // the A5 defect: "how do I stop a nosebleed" was obeyed, not answered.)
             let allowInterrupt = shouldAllowInterrupt?() ?? false
-
-            // "Ok Vision stop" / "stop" during TTS → FULL STOP. Handle this before the general
-            // barge-in: halt everything and go quiet. Critically, reset recognition to clear the
-            // buffer — the transcript still starts with "ok vision", so without a reset it would
-            // re-match this branch on every partial result and churn listening/processing forever.
-            if allowInterrupt && isStopPhrase(transcription) {
-                print("[VoiceCommand] Stop phrase during TTS — halting")
-                onStopCommand?()
-                currentTranscription = ""
-                hasSpokenThisTurn = false
-                silenceTimer?.invalidate(); silenceTimer = nil
-                state = isWakeWordEnabled ? .idle : .listening
-                restartRecognition()   // clear the stale "ok vision ... stop" buffer
-                return
-            }
 
             if allowInterrupt && detectWakeWord(in: transcription, bypassCooldown: true)
                 && wakeWordAtStart(transcription) {
@@ -578,51 +573,11 @@ final class VoiceCommandService: ObservableObject {
                 return
             }
 
-            // NOTE: no naive "any speech" barge-in here. detectSpeechStart is just `count > 3`, so
-            // during the processing→speaking window it fired on our OWN audio — the command echo
-            // (before TTS starts, when isBargeInPaused is still false) and the reply the mic hears
-            // back — flipping the UI to "Listening" mid-reply and tearing the session down. Deliberate
-            // interruption is handled above: "Ok Vision …" (wake word at start) or a stop phrase.
+            // NOTE: no naive "any speech" barge-in here — during the processing→speaking window it
+            // fired on our OWN audio (the command echo and the reply the mic hears back), flipping
+            // the UI to "Listening" mid-reply and tearing the session down. Deliberate interruption
+            // is "Ok Vision …" (wake word at start + a command), above.
         }
-    }
-
-    /// True when the user asked to stop during TTS: the transcript contains BOTH the wake word and
-    /// a stop word. Requiring the wake word means the TTS reply's own words (which the mic hears
-    /// through the glasses) can't false-trigger a stop. Excludes "stop video/stream" — that's a
-    /// live-video command handled elsewhere.
-    private func isStopPhrase(_ text: String) -> Bool {
-        let lower = text.lowercased()
-        if lower.contains("video") || lower.contains("stream") || lower.contains("видео") || lower.contains("стрим") { return false }
-        // Without the wake word, only a BARE stop word counts ("стоп", "stop", "хватит" — the whole
-        // utterance, ≤3 words). Echo of the reply audio never transcribes to just that, so this is
-        // safe from phantom stops while still letting the wearer cut a reply short without the
-        // "Аурелия, …" prefix (Margo's glasses 2026-08-16: replies could not be stopped).
-        if !detectWakeWord(in: text, bypassCooldown: true) {
-            // The recognizer's transcript is CUMULATIVE for the session (it also carries the echo of
-            // the reply the mic hears), so match the TAIL: the last 1-3 words must be a stop phrase.
-            let cleaned = lower.replacingOccurrences(of: "[.,!?…]", with: "", options: .regularExpression)
-            let words = cleaned.split(separator: " ").map(String.init).filter { !$0.isEmpty }
-            guard !words.isEmpty else { return false }
-            let bare: Set<String> = ["stop", "stop it", "ok stop", "okay stop", "enough", "quiet", "shut up",
-                        "стоп", "хватит", "тихо", "замолчи", "перестань", "прекрати", "остановись", "достаточно",
-                        "стоп стоп", "хватит хватит", "всё хватит", "все хватит",
-                        "досить", "замовкни", "stil", "hou op", "genoeg", "para", "basta", "silencio", "cállate"]
-            for n in 1...min(3, words.count) {
-                if bare.contains(words.suffix(n).joined(separator: " ")) { return true }
-            }
-            return false
-        }
-        var stopWords = ["stop", "be quiet", "shut up", "silence", "quiet", "enough", "cancel"]
-        // The English words stay in every language (they cost nothing and the recognizer can emit
-        // them for loanwords); the target language's own stop words are what actually get said.
-        switch SpeechLocale.voiceLanguageCode {
-        case "ru": stopWords += ["стоп", "хватит", "тихо", "замолчи", "отмена", "перестань"]
-        case "uk": stopWords += ["стоп", "досить", "тихо", "замовкни", "скасувати", "припини"]
-        case "nl": stopWords += ["stop", "stil", "hou op", "genoeg", "annuleer"]
-        case "es": stopWords += ["para", "basta", "silencio", "cállate", "cancela"]
-        default: break
-        }
-        return stopWords.contains { lower.contains($0) }
     }
 
     /// Every phrase that counts as the wake word: the configured phrase, the stock "Ok Vision"
@@ -700,7 +655,19 @@ final class VoiceCommandService: ObservableObject {
             playActivation()
         }
 
-        // Transition to listening
+        guard pushToAskEnabled else {
+            // AUR-742: the wake word is the DOOR, not a command prefix. Stay in `.idle` — the
+            // conversation opens in the realtime session (the ViewModel stops this recognizer the
+            // moment the rig comes up). The recognizer is relaunched so the cumulative transcript
+            // (still holding «Аурелия») cannot re-fire the door after the cooldown when the
+            // session fails to open (no backend, no mic).
+            currentTranscription = ""
+            restartRecognition()
+            onWakeWordDetected?()
+            return
+        }
+
+        // Push-to-ask (AUR-744): capture the command that follows the wake word.
         state = .listening
         currentTranscription = ""
 
@@ -744,19 +711,7 @@ final class VoiceCommandService: ObservableObject {
         onCommandCaptured?(command)
     }
 
-    /// Handle barge-in (user interrupts AI)
-    private func handleBargeIn() {
-        print("[VoiceCommand] Barge-in detected")
-        state = .listening
-        onInterruption?()
-    }
-
-    /// Detect if user started speaking
-    private func detectSpeechStart(in text: String) -> Bool {
-        return text.count > 3 // Simple heuristic
-    }
-
-    // MARK: - Timers
+    // MARK: - Timers (push-to-ask only, AUR-744)
 
     /// Reset silence timer
     private func resetSilenceTimer() {

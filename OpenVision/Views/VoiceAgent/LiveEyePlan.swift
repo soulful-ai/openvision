@@ -17,11 +17,17 @@ enum LiveEyePlan: Equatable {
     /// No glasses able to serve as the eye → the phone's rear camera.
     case phone
 
-    /// - requested: the wearer asked for the eye («включи камеру» / "camera on" / the toggle).
+    /// - requested: the wearer asked for the eye (the in-call camera button, the brain's `eye.on`,
+    ///   or Settings → Camera at call start).
     /// - glassesAvailable: registered AND a device is connected (`startStreaming()` needs both).
     /// - glassesStreaming: their camera stream is already running.
-    static func decide(requested: Bool, glassesAvailable: Bool, glassesStreaming: Bool) -> LiveEyePlan {
+    /// - preferPhone (AUR-742): the wearer picked the PHONE camera explicitly (the in-call cycle
+    ///   Off → Glasses → Phone, or Settings → Camera = Phone) — the phone serves even with the
+    ///   glasses there. Default false keeps the glasses-first rule.
+    static func decide(requested: Bool, glassesAvailable: Bool, glassesStreaming: Bool,
+                       preferPhone: Bool = false) -> LiveEyePlan {
         guard requested else { return .off }
+        if preferPhone { return .phone }
         if glassesAvailable { return .glasses(startStream: !glassesStreaming) }
         return .phone
     }

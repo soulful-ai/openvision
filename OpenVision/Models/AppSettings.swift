@@ -65,6 +65,24 @@ enum TTSEngineType: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// AUR-742: which eye the live conversation opens with. The call itself is AUDIO-first (AUR-757,
+/// principal ruling 2026-08-18): `.off` keeps both cameras shut until the wearer asks (the in-call
+/// camera button, or «смотри» / "look" → the brain's `eye.on`); `.glasses` / `.phone` open that eye
+/// as soon as the conversation is up. The in-call button cycles the eye for THIS call only.
+enum CameraSourcePreference: String, Codable, CaseIterable, Identifiable {
+    case off = "off"
+    case phone = "phone"
+    case glasses = "glasses"
+    var id: String { rawValue }
+    var displayName: String {
+        switch self {
+        case .off: return "Off (ask for it)"
+        case .phone: return "Phone camera"
+        case .glasses: return "Glasses"
+        }
+    }
+}
+
 /// App settings persisted to Documents/settings.json
 struct AppSettings: Codable, Equatable {
     // MARK: - AI Backend Selection
@@ -142,8 +160,22 @@ struct AppSettings: Codable, Equatable {
     /// the spoken "Live video mode active / ended". Off = the call starts and ends silently.
     var callSoundsEnabled: Bool = true
 
-    /// Conversation timeout in seconds (auto-end after silence)
+    /// AUR-742: end the live conversation after this many seconds of silence (nobody talking, no
+    /// recording, no delegated task running) — back to the wake word. 0 = never.
     var conversationTimeout: TimeInterval = 30
+
+    /// AUR-742: the eye at call start — off (audio-only until asked, the AUR-757 default), the
+    /// phone camera, or the glasses. See `CameraSourcePreference`.
+    var cameraSource: CameraSourcePreference = .off
+
+    /// AUR-744: the banked push-to-ask path (wake word → Apple STT → `/v1/chat/completions` →
+    /// per-sentence TTS). OFF by default: «Аурелия» opens the realtime conversation. A runtime
+    /// flag on purpose (no `#if`): the archived code keeps compiling and can be flipped back on in
+    /// five seconds from Settings → Voice Control → Debug if a rig cannot do full duplex.
+    var pushToAskEnabled: Bool = false
+
+    /// AUR-742 §3.5: the one-time "now just say «Аурелия» and talk" note was shown.
+    var oneConversationNoteSeen: Bool = false
 
     /// Language the app listens in and speaks in, as a BCP-47 identifier ("ru-RU", "nl-NL", …).
     /// Empty string (the default) means "follow the device locale". Resolved through

@@ -130,6 +130,11 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
     /// AUR-759: the model the server actually resolved for this session (`session.created`
     /// echoes the registry id, not our request) — what the live-screen chip shows.
     @Published private(set) var activeModel: String?
+    /// AUR-742 / memo §1.6: heavy-lane tasks the brain reports for this session — `task_id` →
+    /// spoken title, for every `aurelia.task.started` / `.queued` until its `.done`. The client's
+    /// minimum viable handling: log them, show a "N running" pill; the SPOKEN channel carries the
+    /// meaning (bridge phrase, hand-off, result), so nothing here gates the conversation.
+    @Published private(set) var runningTasks: [String: String] = [:]
     /// True while `disconnect()` was called by us: no reconnect, fire `onDisconnected`.
     private var intentionalClose = false
     /// Bumped on every teardown. A receive loop only acts while its generation is current, so a
@@ -265,6 +270,7 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
         closeWebSocket()
         sessionId = nil
         activeModel = nil
+        runningTasks.removeAll()
         offlineAudio.removeAll(); offlineAudioBytes = 0
         onDisconnected?()
     }
@@ -602,6 +608,41 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
                 sendActionAck(VoiceActionAck(id: id, action: raw, ok: false, detail: "unknown action", artifact: nil))
             }
 
+        // ── AUR-742 client half of the heavy lane (memo §1.6): log + count the tasks ──────────
+        case "aurelia.task.started", "aurelia.task.queued":
+            let id = (json["task_id"] as? String) ?? UUID().uuidString
+            let title = (json["title"] as? String) ?? "task"
+            runningTasks[id] = type.hasSuffix("queued") ? "\(title) (queued)" : title
+            ovLog("[OpenAIRealtime] ⚙︎ \(type) \(id): \(title) on \((json["device"] as? String) ?? "brain") — \(runningTasks.count) in flight")
+
+        case "aurelia.task.progress":
+            let id = (json["task_id"] as? String) ?? "?"
+            let stage = (json["stage"] as? String) ?? "?"
+            let detail = (json["detail"] as? String) ?? ""
+            let elapsed = (json["elapsed_ms"] as? Double).map { Int($0) } ?? -1
+            ovLog("[OpenAIRealtime] ⚙︎ task.progress \(id): \(stage) \(detail) (\(elapsed) ms)")
+
+        case "aurelia.task.done":
+            let id = (json["task_id"] as? String) ?? "?"
+            let status = (json["status"] as? String) ?? "done"
+            let elapsed = (json["elapsed_ms"] as? Double).map { Int($0) } ?? -1
+            let title = runningTasks.removeValue(forKey: id) ?? "?"
+            ovLog("[OpenAIRealtime] ⚙︎ task.done \(id) \"\(title)\": \(status) in \(elapsed) ms — \(runningTasks.count) left")
+
+        case "aurelia.task.list":
+            // The answer to `aurelia.task.query`: the ledger replaces what we think is running.
+            let tasks = (json["tasks"] as? [[String: Any]]) ?? []
+            var next: [String: String] = [:]
+            for t in tasks {
+                guard let id = t["task_id"] as? String else { continue }
+                let status = (t["status"] as? String) ?? "running"
+                guard status == "running" || status == "queued" else { continue }
+                let title = (t["title"] as? String) ?? "task"
+                next[id] = status == "queued" ? "\(title) (queued)" : title
+            }
+            runningTasks = next
+            ovLog("[OpenAIRealtime] ⚙︎ task.list: \(next.count) running/queued")
+
         // ── AUR-728: the pod is going away — reconnect on the hint, keep the session ──────────
         case "aurelia.server.draining":
             if let id = json["session_id"] as? String { sessionId = id }
@@ -830,6 +871,7 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
             self.connectionState = .disconnected
             self.onConnectionStateChanged?(self.connectionState)
             self.sessionId = nil
+            self.runningTasks.removeAll()
             self.offlineAudio.removeAll(); self.offlineAudioBytes = 0
             // Same exit the End pill takes: the VM tears live mode down and returns to idle.
             self.onDisconnected?()
