@@ -6,7 +6,10 @@ import XCTest
 final class OneConversationSettingsTests: XCTestCase {
 
     /// A settings file written by a pre-AUR-742 build: no `cameraSource`, no `pushToAskEnabled`,
-    /// no `oneConversationNoteSeen`. Her wake word / language / base URL / key / engine survive.
+    /// no `oneConversationNoteSeen`. Loaded the way the app loads it (`SettingsManager.loadSettings`
+    /// — strict decode, then the lenient merge over defaults): her wake word / language / base URL
+    /// / key / engine survive and the new fields take their defaults.
+    @MainActor
     func testOldSettingsFileDecodesWithOneConversationDefaults() throws {
         let legacy = """
         {
@@ -21,7 +24,12 @@ final class OneConversationSettingsTests: XCTestCase {
           "preferGlassesMic": true
         }
         """
-        let decoded = try JSONDecoder().decode(AppSettings.self, from: Data(legacy.utf8))
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("legacy-settings-\(UUID().uuidString).json")
+        try Data(legacy.utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let decoded = SettingsManager.loadSettings(from: url)
 
         XCTAssertEqual(decoded.cameraSource, .off, "audio-first by default (AUR-757)")
         XCTAssertFalse(decoded.pushToAskEnabled, "push-to-ask is banked: OFF by default (AUR-744)")

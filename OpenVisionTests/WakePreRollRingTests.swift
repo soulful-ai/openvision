@@ -26,11 +26,12 @@ final class WakePreRollRingTests: XCTestCase {
         XCTAssertEqual(ring.bufferedSeconds, 2.0, accuracy: 0.001)
         let all = ring.snapshot()
         XCTAssertEqual(all.count, ring.capacityBytes)
-        // The head is the NEWEST 2 s → the first 0.5 s are value 1 (the tail of the old block),
-        // the rest value 2.
+        // What remains is the NEWEST 2 s: the last 1.0 s of the old block (value 1), then the
+        // whole new block (value 2) — the oldest 0.5 s fell off.
         let samples = all.withUnsafeBytes { Array($0.bindMemory(to: Int16.self)) }
         XCTAssertEqual(samples.first, 1)
-        XCTAssertEqual(samples[Int(0.5 * Double(rate)) + 10], 2)
+        XCTAssertEqual(samples[Int(1.0 * Double(rate)) - 10], 1)
+        XCTAssertEqual(samples[Int(1.0 * Double(rate)) + 10], 2)
         XCTAssertEqual(samples.last, 2)
     }
 

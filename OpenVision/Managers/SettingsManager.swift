@@ -107,7 +107,9 @@ final class SettingsManager: ObservableObject {
         }
     }
 
-    private static func loadSettings(from url: URL) -> AppSettings {
+    /// Internal (not private) so the migration behaviour is unit-testable (AUR-742 §3.5: an
+    /// older settings.json must survive new fields).
+    static func loadSettings(from url: URL) -> AppSettings {
         guard FileManager.default.fileExists(atPath: url.path),
               let data = try? Data(contentsOf: url) else {
             print("[SettingsManager] No settings file, using defaults")
