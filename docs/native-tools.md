@@ -17,7 +17,7 @@ the model only decides *when* to call a tool and *with what arguments*; the tool
 | Clipboard | `copy_to_clipboard` | UIPasteboard | Foreground-only write; queued + re-applied when backgrounded — see [Deferred effects](#deferred-effects--the-clipboard-and-the-wire-the-server-half-is-coded-against-aur-845) |
 | Phone status | `status` | UIDevice / Network / NetworkExtension / ProcessInfo | Battery, link type, thermal, free storage — see [Phone status](#phone-status-aur-794) |
 | Shazam | `shazam` | ShazamKit | 6-12 s listen on the **phone** mic — see [Shazam → Spotify](#shazam--spotify-aur-793) |
-| Spotify | `spotify_play` · `spotify_like` · `spotify_now_playing` · `spotify_control` | Spotify Web API (OAuth PKCE) | Honest `not_linked:spotify` until the account is linked |
+| Spotify | `spotify_play` · `spotify_like` · `spotify_now_playing` · `spotify_control` | Spotify Web API (OAuth PKCE) | Client id shipped; honest `not_linked:spotify` until someone taps **Connect** |
 
 > There is intentionally **no alarm tool**. iOS gives third-party apps no API to create alarms in
 > the Clock app, and a plain notification is a poor substitute for a wake-up alarm. Use a reminder
@@ -204,19 +204,32 @@ lacks the *Access Wi-Fi Information* entitlement, so the tool reads the location
 reports `ssidMiss: location_permission` | `entitlement` | `not_wifi` | `simulator`. It never guesses
 a network name.
 
-The entitlement is **not committed**, on purpose. Adding
-`com.apple.developer.networking.wifi-info` to `OpenVision.entitlements` fails the device build
-today (verified 2026-08-21):
+**The entitlement is committed as of AUR-845b (2026-08-21).** It was held back for one morning
+because the app signed against the XC wildcard profile, which carries no capabilities at all:
 
 ```
 error: Provisioning profile "iOS Team Provisioning Profile: *" doesn't include
        the Access Wi-Fi Information capability.
 ```
 
-One human step unblocks it, once: developer.apple.com → Certificates, Identifiers & Profiles →
-Identifiers → `app.soulless.openvision` → enable **Access Wi-Fi Information** → Save. *Then* add the
-key to `OpenVision.entitlements` and rebuild; nothing in the Swift changes. Until then the tool
-answers everything else and names the missing piece.
+The fix was not in the repo. `app.soulless.openvision` is now an **explicit App ID** (`4DUB6L4475`,
+team `3JAHQ7PYLM`) with *Access Wi-Fi Information* enabled, and automatic signing has to pick it to
+satisfy the key — the build log now reads `Provisioning Profile: "iOS Team Provisioning Profile:
+app.soulless.openvision"`, not `: *`. `com.apple.developer.networking.wifi-info` is in
+`OpenVision.entitlements`; nothing in the Swift changed. The `ssidMiss: entitlement` branch stays —
+it is now a real signal (a mis-signed build) rather than the expected state.
+
+**One trap for anyone building this from the CLI.** Fetching the explicit profile needs portal
+access, and `xcodebuild` has none: with no Apple ID in Xcode's Accounts it fails with
+`error: No Accounts: Add a new account in Accounts settings` and silently falls back to the cached
+wildcard profile. Authenticate with the App Store Connect API key instead:
+
+```
+xcodebuild build … -allowProvisioningUpdates \
+  -authenticationKeyPath ~/.private_keys/AuthKey_6MU7DYSFH7.p8 \
+  -authenticationKeyID 6MU7DYSFH7 \
+  -authenticationKeyIssuerID be177da0-1e8f-46af-bd33-f243f86f793a
+```
 
 **The glasses battery is absent, not faked.** The pinned SDK
 (`meta-wearables-dat-ios` **0.4.0**, see `project.yml`) declares
@@ -288,29 +301,52 @@ rule). The tool gets a 20-s wire timeout (`timeoutOverrides`), since the 8-s def
 12-s listen in half. The match is kept in `ShazamLastMatch` so «включи её» has an antecedent without
 the model having to carry an id.
 
-**One human step, once:** developer.apple.com → Identifiers → `app.soulless.openvision` →
-App Services → **ShazamKit** → Save. Until then a match attempt comes back as an SHError and the
-tool reports it (`shazam_failed:202`) instead of pretending it heard nothing. The
-`com.apple.developer.shazamkit` entitlement key is deliberately **not committed** — an entitlement
-the wildcard team provisioning profile does not carry fails the device build outright (verified with
-the Wi-Fi-info key, 2026-08-21), so it goes in together with the portal toggle, never before it.
+**The portal toggle is on** (developer.apple.com → Identifiers → `app.soulless.openvision` →
+App Services → **ShazamKit**), confirmed straight from the App Store Connect API on 2026-08-21:
+bundle id `4DUB6L4475` carries `IN_APP_PURCHASE`, `SHAZAM_KIT`, `ACCESS_WIFI_INFORMATION`.
 
-### `phone.spotify_*` — waits on a developer app that does not exist yet
+**There is still no `com.apple.developer.shazamkit` key in the entitlements file, and that is
+correct — not an oversight.** ShazamKit is an App *Service*, authorised server-side by bundle id,
+not a profile capability. Three independent checks say the same thing:
 
-There is no Spotify client id, so `SpotifyConfig.isConfigured` is false, the connection reports
-`unlinked`, and **every** Spotify tool answers `not_linked:spotify` with «Spotify не подключён —
+* the development profile Apple issued *minutes after* the toggle
+  (`iOS Team Provisioning Profile: app.soulless.openvision`) carries `wifi-info` and **no** shazam key;
+* adding the key anyway fails the device build —
+  `error: Entitlement com.apple.developer.shazamkit not found and could not be included in profile.
+  This likely is not a valid entitlement and should be removed from your entitlements file.`;
+* Xcode 26.5's own capability bundle lists 192 capabilities, none of them `SHAZAM_KIT`, and the
+  string `com.apple.developer.shazamkit` appears nowhere in Xcode.
+
+So the honest reporting in `ShazamTool` stays the truth-teller: if catalog matching is still refused
+on device, `shazam_failed:<code>` is the signal to chase — a missing entitlement key is not the cause,
+because there is no key to add.
+
+### `phone.spotify_*` — the developer app exists; one tap left
+
+The Spotify app **OpenVision (Aurelia)** exists (redirect URI `openvision://spotify`, Web API,
+Development mode, iOS bundle `app.soulless.openvision`) and its client id rides `Config.xcconfig` →
+`Info.plist` into the build. `SpotifyConfig.isConfigured` is now **true**, so the Connections row's
+blocker is gone and its button is a real **Connect**.
+
+The account is still unlinked until somebody logs in, and that cannot be automated: linking opens an
+`ASWebAuthenticationSession` sheet and needs a human at the phone. Until then the connection reports
+`unlinked` and **every** Spotify tool answers `not_linked:spotify` with «Spotify не подключён —
 открой Connections в настройках и подключи». Never a fake `ok`.
 
-**The five minutes that turn it on** (developer.spotify.com):
+**The one tap that finishes it**, on the phone with this build installed:
 
-1. Log in → **Dashboard** → **Create app**.
-2. App name: `OpenVision (Aurelia)` · description: anything.
-3. **Redirect URI**: `openvision://spotify` — exactly this, then **Add**.
-4. Which API/SDKs: tick **Web API**.
-5. Save → open the app → **Settings** → copy the **Client ID**.
-6. Paste it into `Config.xcconfig` as `SPOTIFY_CLIENT_ID = <id>` (gitignored — the id is not a
-   secret for a PKCE public client, but it is per-developer), rebuild.
-7. On the phone: Settings → Connections → Spotify → **Connect** → the Spotify login sheet → Agree.
+> **Settings → Connections → Spotify → Connect** → the Spotify login sheet → **Agree**.
+
+The row flips to `linked`, `aurelia.client_tools.connections["spotify"]` goes out again on the next
+manifest, and every `phone.spotify_*` tool starts answering for real.
+
+Because the app is in Spotify's **Development mode**, only accounts added to its dashboard user list
+can log in — the owning account works out of the box; anyone else has to be added there first.
+
+*(For a fresh developer app, the five minutes are: developer.spotify.com → Dashboard → Create app →
+name `OpenVision (Aurelia)` → Redirect URI `openvision://spotify` → tick **Web API** → Save →
+Settings → copy the **Client ID** → paste into `Config.xcconfig` as `SPOTIFY_CLIENT_ID = <id>`,
+which is gitignored: not a secret for a PKCE public client, but per-developer.)*
 
 No client **secret** is ever needed or stored: the link is Authorization Code + PKCE (S256), and the
 tokens live in the Keychain (never UserDefaults). Scopes requested: `user-read-playback-state`,

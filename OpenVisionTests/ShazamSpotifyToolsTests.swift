@@ -29,15 +29,25 @@ final class ShazamSpotifyToolsTests: XCTestCase {
         struct Reply { let status: Int; let json: Any }
         var replies: [String: Reply] = [:]
         private(set) var calls: [String] = []
+        /// The form/JSON body per "METHOD path" — the PKCE exchange is only checkable from here.
+        private(set) var bodies: [String: String] = [:]
         func send(_ request: URLRequest) async throws -> (Data, Int) {
             let method = request.httpMethod ?? "GET"
             let path = (request.url?.path ?? "")
             let key = "\(method) \(path)"
             calls.append("\(key)?\(request.url?.query ?? "")")
+            if let body = request.httpBody { bodies[key] = String(decoding: body, as: UTF8.self) }
             guard let reply = replies[key] else { return (Data(), 500) }
             let data = (try? JSONSerialization.data(withJSONObject: reply.json)) ?? Data()
             return (data, reply.status)
         }
+    }
+
+    /// A reference box for the authorize seam: the closure is escaping and non-isolated, so it
+    /// cannot write to a captured `var`.
+    final class Captured: @unchecked Sendable {
+        var url: URL?
+        var scheme: String?
     }
 
     private let match = ShazamMatch(title: "Bohemian Rhapsody", artist: "Queen",
@@ -148,10 +158,17 @@ final class ShazamSpotifyToolsTests: XCTestCase {
         } catch { XCTFail("wrong error: \(error)") }
     }
 
-    // MARK: - Spotify: the state Anton's phone is in tonight (no developer app)
+    // MARK: - Spotify: the unconfigured state (no client id in the build)
+    //
+    // These three used to clear the override to `nil` and lean on an empty Info.plist. That was
+    // only ever true while there was no Spotify developer app: the tests run HOSTED (TEST_HOST is
+    // OpenVision.app), so `Bundle.main` is the app, and the moment SPOTIFY_CLIENT_ID landed in
+    // Config.xcconfig the fallback started handing them a real id and the assertions inverted.
+    // `""` is the honest way to say "this build has no client id" — it overrides the bundle
+    // instead of deferring to it, so the not-linked contract stays testable forever.
 
     func testEverySpotifyToolIsHonestlyNotLinkedWithoutAClientID() async {
-        SpotifyConfig.overrideClientID = nil
+        SpotifyConfig.overrideClientID = ""
         XCTAssertFalse(SpotifyConfig.isConfigured)
         XCTAssertEqual(SpotifyConfig.redirectURI, "openvision://spotify")
 
@@ -171,7 +188,7 @@ final class ShazamSpotifyToolsTests: XCTestCase {
 
     /// End to end over the realtime bridge — what the brain actually sees tonight.
     func testBridgeAnswersNotLinkedForASpotifyCall() async throws {
-        SpotifyConfig.overrideClientID = nil
+        SpotifyConfig.overrideClientID = ""
         var sent: [[String: Any]] = []
         let bridge = ClientToolBridge(tools: NativeToolRegistry.shared.allTools,
                                       connectionsProvider: { PhoneConnections() },
@@ -191,7 +208,7 @@ final class ShazamSpotifyToolsTests: XCTestCase {
     }
 
     func testConnectionsRowNamesTheMissingClientID() {
-        SpotifyConfig.overrideClientID = nil
+        SpotifyConfig.overrideClientID = ""
         let blocker = SpotifyConnection(tokens: nil).blocker
         XCTAssertNotNil(blocker)
         XCTAssertTrue(blocker!.contains("developer.spotify.com"), blocker!)
@@ -200,6 +217,135 @@ final class ShazamSpotifyToolsTests: XCTestCase {
         XCTAssertEqual(SpotifyConnection(tokens: SpotifyTokens(accessToken: "a", refreshToken: "r",
                                                                expiresAt: .distantFuture)).wireState,
                        "linked")
+    }
+
+    // MARK: - Spotify: the real developer app (AUR-845b — the day the id exists IS today)
+
+    /// The client id stopped being a human step: the Spotify app "OpenVision (Aurelia)" exists and
+    /// `SPOTIFY_CLIENT_ID` rides Config.xcconfig → Info.plist into the build. No override, no seam —
+    /// this reads exactly what the shipped binary reads. If someone builds from a fresh checkout
+    /// without the id, this fails loudly instead of quietly shipping a dark feature.
+    func testTheShippedBuildCarriesARealClientIDAndTheRegisteredRedirect() {
+        SpotifyConfig.overrideClientID = nil            // read the real bundle, not a fake
+        XCTAssertTrue(SpotifyConfig.isConfigured,
+                      "SPOTIFY_CLIENT_ID missing — copy it into Config.xcconfig")
+        let id = SpotifyConfig.clientID
+        XCTAssertEqual(id.count, 32, "a Spotify client id is 32 hex chars, got \(id.count)")
+        XCTAssertTrue(id.allSatisfy(\.isHexDigit), id)
+
+        // The redirect must match the dashboard entry VERBATIM — one character off and Spotify
+        // answers INVALID_CLIENT before the user ever sees a login form.
+        XCTAssertEqual(SpotifyConfig.redirectURI, "openvision://spotify")
+
+        // ...and the scheme has to be REGISTERED, or the callback has nowhere to come home to.
+        let types = Bundle.main.infoDictionary?["CFBundleURLTypes"] as? [[String: Any]] ?? []
+        let schemes = types.flatMap { ($0["CFBundleURLSchemes"] as? [String]) ?? [] }
+        XCTAssertTrue(schemes.contains("openvision"), "openvision:// not registered: \(schemes)")
+
+        // Spotify's own scheme must be queryable or canOpenURL lies and the deferred play gives up.
+        let queried = Bundle.main.infoDictionary?["LSApplicationQueriesSchemes"] as? [String] ?? []
+        XCTAssertTrue(queried.contains("spotify"), "spotify not in LSApplicationQueriesSchemes")
+
+        // Nothing left to block the Connections row: the button is now a real Connect.
+        XCTAssertNil(SpotifyConnection(tokens: nil).blocker)
+    }
+
+    /// The whole PKCE dance end to end against the REAL client id, with only the two seams the
+    /// device supplies faked (the browser sheet and the network). Everything between them — the
+    /// authorize URL, the state check, the S256 challenge/verifier pair, the token exchange, the
+    /// link state — is the shipping code path. The one thing a test cannot do is Anton's tap.
+    func testTheFullPKCEDanceRunsAgainstTheRealClientID() async throws {
+        SpotifyConfig.overrideClientID = nil            // the real id, deliberately
+        let http = FakeHTTP()
+        http.replies["POST /api/token"] = .init(status: 200, json: [
+            "access_token": "AT-real", "refresh_token": "RT-real", "expires_in": 3600
+        ])
+        let connection = SpotifyConnection(tokens: nil)
+        connection.http = http
+
+        let seen = Captured()
+        connection.authorize = { url, scheme in
+            seen.url = url
+            seen.scheme = scheme
+            // Spotify redirects back with the code and echoes the state we sent.
+            let state = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first { $0.name == "state" }?.value ?? ""
+            return URL(string: "openvision://spotify?code=AUTH_CODE&state=\(state)")!
+        }
+
+        try await connection.connect()
+
+        // (a) the authorization request
+        let url = try XCTUnwrap(seen.url)
+        XCTAssertEqual(url.host, "accounts.spotify.com")
+        XCTAssertEqual(url.path, "/authorize")
+        let q = Dictionary(uniqueKeysWithValues: (URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        XCTAssertEqual(q["client_id"], SpotifyConfig.clientID)
+        XCTAssertEqual(q["response_type"], "code")
+        XCTAssertEqual(q["redirect_uri"], "openvision://spotify")
+        XCTAssertEqual(q["code_challenge_method"], "S256")
+        XCTAssertEqual(Set((q["scope"] ?? "").split(separator: " ").map(String.init)),
+                       Set(SpotifyConfig.scopes))
+        // ASWebAuthenticationSession is handed the bare scheme, never the whole URI.
+        XCTAssertEqual(seen.scheme, "openvision")
+
+        // (b) the token exchange — and the PKCE proof: the verifier we sent hashes to the
+        //     challenge we advertised. If these two ever drift, every real login 400s.
+        let body = try XCTUnwrap(http.bodies["POST /api/token"])
+        var form = URLComponents()
+        form.percentEncodedQuery = body
+        let f = Dictionary(uniqueKeysWithValues: (form.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        XCTAssertEqual(f["grant_type"], "authorization_code")
+        XCTAssertEqual(f["code"], "AUTH_CODE")
+        XCTAssertEqual(f["redirect_uri"], "openvision://spotify")
+        XCTAssertEqual(f["client_id"], SpotifyConfig.clientID)
+        XCTAssertNil(f["client_secret"], "a PKCE public client must never send a secret")
+        let verifier = try XCTUnwrap(f["code_verifier"])
+        XCTAssertEqual(SpotifyConnection.codeChallenge(for: verifier), q["code_challenge"])
+
+        // (c) the state the Connections row and the wire both read afterwards
+        XCTAssertTrue(connection.isLinked)
+        XCTAssertEqual(connection.wireState, "linked")
+        XCTAssertEqual(connection.tokens?.accessToken, "AT-real")
+        let fresh = try await connection.accessToken()
+        XCTAssertEqual(fresh, "AT-real", "a fresh token must be handed back without a refresh round-trip")
+    }
+
+    /// A mismatched `state` is a hijacked callback, and the only safe answer is to link nothing.
+    func testAMismatchedStateLinksNothing() async {
+        SpotifyConfig.overrideClientID = nil
+        let connection = SpotifyConnection(tokens: nil)
+        connection.http = FakeHTTP()
+        connection.authorize = { _, _ in URL(string: "openvision://spotify?code=C&state=not-ours")! }
+        do {
+            try await connection.connect()
+            XCTFail("a forged state must not link")
+        } catch {
+            XCTAssertEqual(error as? SpotifyError, .cancelled)
+        }
+        XCTAssertFalse(connection.isLinked)
+    }
+
+    /// With the id in the build and an account linked, `phone.spotify_now_playing` is reachable
+    /// over the realtime bridge — the same call the brain makes. This is the far end of the wire
+    /// that AUR-845b had to reach; only Anton's tap sits between it and a real account.
+    func testNowPlayingIsReachableOverTheBridgeOnceLinked() async throws {
+        SpotifyConfig.overrideClientID = nil            // the real id
+        let http = FakeHTTP()
+        http.replies["GET /v1/me/player/currently-playing"] = .init(status: 200, json: [
+            "is_playing": true,
+            "item": ["name": "Bohemian Rhapsody", "uri": "spotify:track:1", "id": "1",
+                     "artists": [["name": "Queen"]]]
+        ])
+        let connection = SpotifyConnection(tokens: SpotifyTokens(accessToken: "AT", refreshToken: "RT",
+                                                                 expiresAt: .distantFuture))
+        connection.http = http
+        var tool = SpotifyNowPlayingTool()
+        tool.ctx.connection = { connection }
+        tool.ctx.client = { SpotifyClient(connection: connection) }
+        let spoken = try await tool.execute(args: [:])
+        XCTAssertEqual(spoken, "Играет: «Bohemian Rhapsody» — Queen.")
     }
 
     // MARK: - Spotify: the linked behaviour (what turns on the day the id exists)
