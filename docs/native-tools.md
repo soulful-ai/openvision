@@ -15,6 +15,7 @@ the model only decides *when* to call a tool and *with what arguments*; the tool
 | Calendar | `calendar` | EventKit (Events) | `today` / `upcoming` / `add` |
 | Note | `note` | UserDefaults + CoreLocation | `save` / `search` / `list` / `delete`, auto-tagged with place + time |
 | Clipboard | `copy_to_clipboard` | UIPasteboard | Foreground-only write; queued + re-applied when backgrounded — see [Deferred effects](#deferred-effects--the-clipboard-and-the-wire-the-server-half-is-coded-against-aur-845) |
+| Phone status | `status` | UIDevice / Network / NetworkExtension / ProcessInfo | Battery, link type, thermal, free storage — see [Phone status](#phone-status-aur-794) |
 
 > There is intentionally **no alarm tool**. iOS gives third-party apps no API to create alarms in
 > the Clock app, and a plain notification is a poor substitute for a wake-up alarm. Use a reminder
@@ -177,6 +178,52 @@ real changes) — the same rail AUR-803b built for `tz` / `utcOffsetMin`:
 `appState` is `"active"` | `"inactive"` | `"background"`. The brain needs it to read a `deferred`
 clipboard result without guessing: the phone is in the wearer's pocket, so the paste has **not**
 landed yet.
+
+## Phone status (AUR-794)
+
+`phone.status` answers «сколько батареи?» / «какой вайфай?» from the glasses. It reads only stable
+Apple APIs and has **no `permissionKind`** — battery, thermal, storage and the interface type need
+no permission, and gating the whole call behind a location prompt would make "how much battery"
+fail for the wrong reason. The one part that does need something reports its own state inline,
+which is the AUR-836 rule applied inside a result instead of around it.
+
+| Field | Source | Absent when |
+|---|---|---|
+| `battery %` + charging | `UIDevice.current.batteryLevel` / `batteryState` (monitoring enabled on first read) | simulator (`-1`) |
+| link + `expensive` / low-data | `NWPathMonitor`, one shot, first update wins, 2-s cap | never (falls back to `offline`) |
+| Wi-Fi **name** | `NEHotspotNetwork.fetchCurrent()` | see the two misses below |
+| thermal | `ProcessInfo.thermalState` | never |
+| free storage | `volumeAvailableCapacityForImportantUsage` | never in practice |
+| glasses battery | DAT SDK | **always today** — see below |
+
+**The Wi-Fi name needs two things, and the tool says which one is missing.**
+`NEHotspotNetwork.fetchCurrent()` returns `nil` both when Location is not granted and when the app
+lacks the *Access Wi-Fi Information* entitlement, so the tool reads the location status itself and
+reports `ssidMiss: location_permission` | `entitlement` | `not_wifi` | `simulator`. It never guesses
+a network name.
+
+The entitlement is **not committed**, on purpose. Adding
+`com.apple.developer.networking.wifi-info` to `OpenVision.entitlements` fails the device build
+today (verified 2026-08-21):
+
+```
+error: Provisioning profile "iOS Team Provisioning Profile: *" doesn't include
+       the Access Wi-Fi Information capability.
+```
+
+One human step unblocks it, once: developer.apple.com → Certificates, Identifiers & Profiles →
+Identifiers → `app.soulless.openvision` → enable **Access Wi-Fi Information** → Save. *Then* add the
+key to `OpenVision.entitlements` and rebuild; nothing in the Swift changes. Until then the tool
+answers everything else and names the missing piece.
+
+**The glasses battery is absent, not faked.** The pinned SDK
+(`meta-wearables-dat-ios` **0.4.0**, see `project.yml`) declares
+`public struct DeviceState { public let batteryLevel: Int; public let hingeState: HingeState }` and
+`final public class DeviceStateSession` — but that class publishes only `state: SessionState`,
+`start()` and `stop()`: no accessor, listener or stream in the public interface ever hands a
+`DeviceState` back, and `WearablesInterface` has no battery member either. So the number is
+unreachable and the result carries `glasses battery unavailable (dat_0.4.0_no_public_accessor)`.
+`GlassesManager.glassesBatteryPercent` is the single place to fill in when a later DAT exposes it.
 
 ## Privacy
 

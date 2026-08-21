@@ -56,6 +56,7 @@
 		6C065C29CC13488E67A70363 /* SoundService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE2B8AE1E195B62D980BEA66 /* SoundService.swift */; };
 		6E678BA570E5148EE9D9B4FE /* MLXHuggingFace in Frameworks */ = {isa = PBXBuildFile; productRef = 4169E6A87853A9ECECC3C6E4 /* MLXHuggingFace */; };
 		6F8F4FD14445FC3FE1A771D2 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2410F1B11CD5A7070F3E7590 /* Assets.xcassets */; };
+		718EC57FC69492CA37847C3F /* PhoneStatusTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94AA7F97EA38E443AAB64EF5 /* PhoneStatusTool.swift */; };
 		727F307403AA023DBFDA95D9 /* VoiceActionBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60C47C490AC346C5646BBA63 /* VoiceActionBar.swift */; };
 		758F66B632E8A1CBDBB40094 /* OpenClawSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EAFCA981F220C3F978645D70 /* OpenClawSettingsView.swift */; };
 		7694BA570FF3ACCF29E2C5C9 /* GeminiLiveService.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADCFF581A7AE50FBF35EA257 /* GeminiLiveService.swift */; };
@@ -87,6 +88,7 @@
 		BFD9D5E86289F987AC6931B8 /* TranscriptBubble.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E256E8AF9CAB4123C91B979 /* TranscriptBubble.swift */; };
 		C328DABCDFDF6531B38D4834 /* TTSService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D416290774C17FDC0DDFBC68 /* TTSService.swift */; };
 		C3B4CF9D8B6EC21957CC7BEF /* OpenClawProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7946C8232CEA5A362056AC2A /* OpenClawProtocol.swift */; };
+		C66B7DFAEBF4A70E497487A7 /* PhoneStatusToolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61CE6B7F9307F06DB636E9E1 /* PhoneStatusToolTests.swift */; };
 		C73C6168161C8A3DCED11B8E /* LiveEyePlanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4BDA8F2F09F48BF3A3949BD /* LiveEyePlanTests.swift */; };
 		CA2AE93EC9A79A01AE98C8DF /* OneConversationSettingsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40320377B81B44255CD8C57D /* OneConversationSettingsTests.swift */; };
 		CB6636C853387785316153FD /* ReminderTool.swift in Sources */ = {isa = PBXBuildFile; fileRef = 356A075E2D281F1FF15A67C3 /* ReminderTool.swift */; };
@@ -175,6 +177,7 @@
 		60C47C490AC346C5646BBA63 /* VoiceActionBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceActionBar.swift; sourceTree = "<group>"; };
 		60E2210A5A20177647BDB5AD /* Config.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Config.swift; sourceTree = "<group>"; };
 		6188DD26571BACB30096654D /* Conversation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Conversation.swift; sourceTree = "<group>"; };
+		61CE6B7F9307F06DB636E9E1 /* PhoneStatusToolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneStatusToolTests.swift; sourceTree = "<group>"; };
 		6D80EDF3FFC20786ED7F6654 /* FaceRecognitionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceRecognitionService.swift; sourceTree = "<group>"; };
 		71ACC88CE5E9E799ED607853 /* WebSearchSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSearchSettingsView.swift; sourceTree = "<group>"; };
 		7376B3EE1F53DF1BD56B1095 /* Constants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Constants.swift; sourceTree = "<group>"; };
@@ -188,6 +191,7 @@
 		8601201988376029090B1EAA /* OpenVision.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = OpenVision.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		8D8637C15D8F2B68599FA38D /* OpenVision.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = OpenVision.entitlements; sourceTree = "<group>"; };
 		8DD25C635E9A37E7D6CA7677 /* GlassesManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassesManager.swift; sourceTree = "<group>"; };
+		94AA7F97EA38E443AAB64EF5 /* PhoneStatusTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneStatusTool.swift; sourceTree = "<group>"; };
 		95B6A57340C7B99114F46221 /* ListenBackupUploaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListenBackupUploaderTests.swift; sourceTree = "<group>"; };
 		98C627C6F13B708A7A8D2CDA /* wake_word_ding.mp3 */ = {isa = PBXFileReference; lastKnownFileType = audio.mp3; path = wake_word_ding.mp3; sourceTree = "<group>"; };
 		9BCCC84E6880175BD83F37FD /* ConversationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationManager.swift; sourceTree = "<group>"; };
@@ -558,6 +562,7 @@
 				DA6DC62CBCB893C9A9922686 /* NativeTool.swift */,
 				392E993CFE4CF74C349B9CD9 /* NativeToolSupport.swift */,
 				4831CE885B0320D9CAD71736 /* NotificationForegroundPresenter.swift */,
+				94AA7F97EA38E443AAB64EF5 /* PhoneStatusTool.swift */,
 				45142B60B3D9295D07A3107F /* PomodoroTool.swift */,
 				356A075E2D281F1FF15A67C3 /* ReminderTool.swift */,
 				605D6841BA373D249632606F /* TimerTool.swift */,
@@ -627,6 +632,7 @@
 				DD3DFE96152AAE9145F104D6 /* LocalAgentRouteTests.swift */,
 				BE4D7E31C137C29246EB9281 /* NativeToolSupportTests.swift */,
 				40320377B81B44255CD8C57D /* OneConversationSettingsTests.swift */,
+				61CE6B7F9307F06DB636E9E1 /* PhoneStatusToolTests.swift */,
 				257CFA920D044908381B85FE /* RealtimePlaybackTests.swift */,
 				C3E53DAD9A36C08F3FC28148 /* SessionMetadataTests.swift */,
 				C05A9A6876CC108B7CEDFDFC /* TextChunkingTests.swift */,
@@ -802,6 +808,7 @@
 				DC6776A7CBFBB8E151FB6B85 /* LocalAgentRouteTests.swift in Sources */,
 				5F19226406CF5B705B57BACF /* NativeToolSupportTests.swift in Sources */,
 				CA2AE93EC9A79A01AE98C8DF /* OneConversationSettingsTests.swift in Sources */,
+				C66B7DFAEBF4A70E497487A7 /* PhoneStatusToolTests.swift in Sources */,
 				3861B459D0E170DEFEB6BA09 /* RealtimePlaybackTests.swift in Sources */,
 				F2AE41C44B95A39FDFE2820B /* SessionMetadataTests.swift in Sources */,
 				361AD2F1AB7C557D47CD125D /* TextChunkingTests.swift in Sources */,
@@ -875,6 +882,7 @@
 				758F66B632E8A1CBDBB40094 /* OpenClawSettingsView.swift in Sources */,
 				EF5319DFC76B8BD9A50EF195 /* OpenVisionApp.swift in Sources */,
 				A0C761B8F65AD0892D3FB6E3 /* PhoneCameraService.swift in Sources */,
+				718EC57FC69492CA37847C3F /* PhoneStatusTool.swift in Sources */,
 				5F9D55BB6AA2E4CF8AF85A49 /* PomodoroTool.swift in Sources */,
 				CB6636C853387785316153FD /* ReminderTool.swift in Sources */,
 				1D0AEF3C7A810FF410C8F2E5 /* SessionRecorder.swift in Sources */,

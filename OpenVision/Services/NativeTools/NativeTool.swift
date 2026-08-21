@@ -135,6 +135,7 @@ final class NativeToolRegistry {
             ContextualNoteTool(),
             ClipboardTool(),
             DocumentSearchTool(),
+            PhoneStatusTool(),
         ]
         var map: [String: NativeTool] = [:]
         for t in all { map[t.name] = t }

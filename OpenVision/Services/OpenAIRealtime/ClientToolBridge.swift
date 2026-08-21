@@ -53,6 +53,7 @@
 //                     see docs/native-tools.md § "Deferred effects".
 
 import Foundation
+import CoreLocation
 import EventKit
 import UserNotifications
 import UIKit
@@ -81,6 +82,10 @@ struct PhoneConnections: Equatable {
     var calendar: PhoneConnectionState = .unknown
     var reminders: PhoneConnectionState = .unknown
     var notifications: PhoneConnectionState = .unknown
+    /// AUR-794: Location — not a tool gate of its own, but the Wi-Fi network NAME in
+    /// `phone.status` is unreadable without it (and contextual notes lose their place tag), so the
+    /// brain and the Connections UI both get to see the state.
+    var location: PhoneConnectionState = .unknown
     /// AUR-793 placeholder — a constant until the Spotify link lands (the key is on the wire now
     /// so the server half and the Connections UI have the field to grow into).
     var spotify: String = "unlinked"
@@ -91,6 +96,7 @@ struct PhoneConnections: Equatable {
             "calendar": calendar.rawValue,
             "reminders": reminders.rawValue,
             "notifications": notifications.rawValue,
+            "location": location.rawValue,
             "spotify": spotify
         ]
     }
@@ -98,7 +104,8 @@ struct PhoneConnections: Equatable {
     /// Ordered rows for the Settings → Debug read-out.
     var rows: [(kind: String, state: String)] {
         [("Calendar", calendar.rawValue), ("Reminders", reminders.rawValue),
-         ("Notifications", notifications.rawValue), ("Spotify", spotify)]
+         ("Notifications", notifications.rawValue), ("Location", location.rawValue),
+         ("Spotify", spotify)]
     }
 
     /// The state for one permission kind (a tool's `permissionKind`); nil for an unknown kind.
@@ -107,6 +114,7 @@ struct PhoneConnections: Equatable {
         case "calendar": return calendar
         case "reminders": return reminders
         case "notifications": return notifications
+        case "location": return location
         default: return nil
         }
     }
@@ -124,7 +132,19 @@ struct PhoneConnections: Equatable {
         case .denied: c.notifications = .denied
         @unknown default: c.notifications = .unknown
         }
+        c.location = locationState()
         return c
+    }
+
+    /// AUR-794: Location — read only, never prompts (`CLLocationManager()` init is cheap and its
+    /// `authorizationStatus` is a plain read).
+    private static func locationState() -> PhoneConnectionState {
+        switch CLLocationManager().authorizationStatus {
+        case .authorizedAlways, .authorizedWhenInUse: return .granted
+        case .notDetermined: return .unknown
+        case .denied, .restricted: return .denied
+        @unknown default: return .unknown
+        }
     }
 
     private static func eventKitState(_ entity: EKEntityType) -> PhoneConnectionState {
@@ -150,6 +170,8 @@ struct PhoneConnections: Equatable {
             return (try? await store.requestAccess(to: .reminder)) ?? false
         case "notifications":
             return (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])) ?? false
+        case "location":
+            return await LocationHelper.shared.requestWhenInUse()
         default:
             return false
         }

@@ -162,6 +162,33 @@ final class LocationHelper: NSObject, CLLocationManagerDelegate {
         return (loc, name)
     }
 
+    /// AUR-794: show the When-In-Use prompt and WAIT for the answer — the Connections row's
+    /// "Connect" button and `PhoneConnections.requestPermission(kind: "location")` both need a
+    /// yes/no, not a fire-and-forget. Already-answered statuses return immediately (a granted or
+    /// denied status never re-prompts; iOS would ignore the call anyway).
+    func requestWhenInUse() async -> Bool {
+        let status = manager.authorizationStatus
+        if status == .authorizedWhenInUse || status == .authorizedAlways { return true }
+        guard status == .notDetermined else { return false }
+        return await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
+            authorizationWaiters.append(c)
+            manager.requestWhenInUseAuthorization()
+        }
+    }
+
+    /// Continuations parked on the system prompt (AUR-794).
+    private var authorizationWaiters: [CheckedContinuation<Bool, Never>] = []
+
+    func locationManagerDidChangeAuthorization(_ m: CLLocationManager) {
+        let status = m.authorizationStatus
+        guard status != .notDetermined, !authorizationWaiters.isEmpty else { return }
+        let granted = status == .authorizedWhenInUse || status == .authorizedAlways
+        let waiters = authorizationWaiters
+        authorizationWaiters.removeAll()
+        if granted { m.requestLocation() }
+        for w in waiters { w.resume(returning: granted) }
+    }
+
     func locationManager(_ m: CLLocationManager, didUpdateLocations locs: [CLLocation]) { lastFix = locs.last }
     func locationManager(_ m: CLLocationManager, didFailWithError error: Error) {}
 

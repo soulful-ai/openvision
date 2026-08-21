@@ -47,6 +47,23 @@ final class GlassesManager: ObservableObject {
     /// Error message for UI display
     @Published var errorMessage: String?
 
+    /// AUR-794: the glasses battery for `phone.status` — or the honest reason it is absent.
+    ///
+    /// Checked against the SDK we are pinned to (meta-wearables-dat-ios **0.4.0**, see project.yml):
+    /// `MWDATCore.swiftinterface` DOES declare `public struct DeviceState { public let batteryLevel:
+    /// Swift.Int; public let hingeState: HingeState }` and a `final public class DeviceStateSession`
+    /// — but that class exposes only `state: SessionState`, `start()`, `stop()` and an init: there
+    /// is **no** accessor, listener or stream anywhere in the public interface that hands a
+    /// `DeviceState` back, and `WearablesInterface` has no battery member either. So on 0.4.0 the
+    /// number is unreachable from an app. We return it ABSENT with the reason rather than guessing
+    /// (a wrong battery number on the glasses is worse than no number).
+    ///
+    /// When a later DAT exposes it (a `deviceStateStream()` or a listener), this property is the
+    /// only place to change: keep a `@Published var` fed by the session and return it here.
+    var glassesBatteryPercent: (percent: Int?, miss: String?) {
+        (nil, "dat_0.4.0_no_public_accessor")
+    }
+
     // MARK: - Private Properties
 
     /// AUR-845: accessed lazily, never stored. `Wearables.shared` **fatalErrors** when
