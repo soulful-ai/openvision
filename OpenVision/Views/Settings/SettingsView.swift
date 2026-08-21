@@ -108,6 +108,23 @@ struct SettingsView: View {
                     Text("Voice")
                 }
 
+                // Connections Section — AUR-795: every phone integration the brain can reach,
+                // its live state, and the per-row kill switch that removes it from the wire.
+                Section {
+                    NavigationLink {
+                        ConnectionsSettingsView()
+                    } label: {
+                        HStack {
+                            Label("Connections", systemImage: "app.connected.to.app.below.fill")
+                            Spacer()
+                            Text("\(OpenAIRealtimeService.shared.clientTools.toolNames.count) tools")
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                } header: {
+                    Text("Connections")
+                }
+
                 // Advanced Section
                 Section {
                     NavigationLink {

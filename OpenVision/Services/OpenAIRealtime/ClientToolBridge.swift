@@ -9,7 +9,11 @@
 // untouched, and nothing here runs unless the realtime session is open.
 //
 //   client → server   aurelia.client_tools {tools:[{name,description,parameters,timeoutMs}],
-//                                           connections:{calendar,reminders,notifications,spotify}}
+//                                           connections:{<one key per PhoneIntegration>}}
+//                     — AUR-795: the connections map is the Settings → Connections screen, key for
+//                       key: a permission row reports granted|denied|unknown, an account row
+//                       linked|unlinked, a plain row `on`, and ANY row the wearer switched off
+//                       reports `off` — with its tools removed from `tools` for that session.
 //                     — right after the session's session.update on every (re)connect, and again
 //                       whenever a connection state changes (app became active after a prompt,
 //                       a permission prompt just resolved).
@@ -18,8 +22,8 @@
 //                                          appState:"active"|"background"|"inactive",
 //                                          permissionState:"granted"|"denied"|"notDetermined"|"n/a"}
 //                     aurelia.tool_result {id, ok:false, error:"permission_required:calendar" |
-//                                          "not_linked:spotify" | "timeout" | "busy" |
-//                                          "unknown_tool" | "nothing_to_copy" | "<short>",
+//                                          "not_linked:spotify" | "disabled:<row>" | "timeout" |
+//                                          "busy" | "unknown_tool" | "nothing_to_copy" | "<short>",
 //                                          appState, permissionState}
 //
 // Names: `phone.` + snake_case of the registry name (`^phone\.[a-z0-9_]{1,40}$`), ≤32 tools,
@@ -53,6 +57,7 @@
 //                     see docs/native-tools.md § "Deferred effects".
 
 import Foundation
+import AVFoundation
 import CoreLocation
 import EventKit
 import UserNotifications
@@ -86,26 +91,34 @@ struct PhoneConnections: Equatable {
     /// `phone.status` is unreadable without it (and contextual notes lose their place tag), so the
     /// brain and the Connections UI both get to see the state.
     var location: PhoneConnectionState = .unknown
-    /// AUR-793 placeholder — a constant until the Spotify link lands (the key is on the wire now
-    /// so the server half and the Connections UI have the field to grow into).
+    /// AUR-795: the mic behind `phone.shazam` (and the voice rail in general).
+    var microphone: PhoneConnectionState = .unknown
+    /// AUR-793 — `linked` once an account is connected, `unlinked` until then.
     var spotify: String = "unlinked"
+    /// AUR-795: rows the wearer switched OFF in Settings → Connections. A killed row reports `off`
+    /// on the wire AND its tools drop out of the advertised set — the switch IS the wire.
+    var disabled: Set<String> = []
 
-    /// The `connections` object as sent.
+    /// The `connections` object as sent: one key per `PhoneIntegration`, in declaration order.
+    /// `off` (killed) wins over every other state — a switched-off row's permission is irrelevant.
     var wire: [String: String] {
-        [
-            "calendar": calendar.rawValue,
-            "reminders": reminders.rawValue,
-            "notifications": notifications.rawValue,
-            "location": location.rawValue,
-            "spotify": spotify
-        ]
+        var out: [String: String] = [:]
+        for i in PhoneIntegration.allCases { out[i.rawValue] = state(of: i) }
+        return out
+    }
+
+    /// The state string for one row: `off` when killed, the permission state for a permission row,
+    /// `linked`/`unlinked` for an account row, `on` for a row that needs neither.
+    func state(of integration: PhoneIntegration) -> String {
+        if disabled.contains(integration.rawValue) { return "off" }
+        if let kind = integration.permissionKind, let s = state(for: kind) { return s.rawValue }
+        if integration.linkService == "spotify" { return spotify }
+        return "on"
     }
 
     /// Ordered rows for the Settings → Debug read-out.
     var rows: [(kind: String, state: String)] {
-        [("Calendar", calendar.rawValue), ("Reminders", reminders.rawValue),
-         ("Notifications", notifications.rawValue), ("Location", location.rawValue),
-         ("Spotify", spotify)]
+        PhoneIntegration.allCases.map { (kind: $0.title, state: state(of: $0)) }
     }
 
     /// The state for one permission kind (a tool's `permissionKind`); nil for an unknown kind.
@@ -115,6 +128,7 @@ struct PhoneConnections: Equatable {
         case "reminders": return reminders
         case "notifications": return notifications
         case "location": return location
+        case "microphone": return microphone
         default: return nil
         }
     }
@@ -133,6 +147,8 @@ struct PhoneConnections: Equatable {
         @unknown default: c.notifications = .unknown
         }
         c.location = locationState()
+        c.microphone = microphoneState()
+        c.disabled = await MainActor.run { PhoneIntegrationStore.shared.disabled }
         return c
     }
 
@@ -143,6 +159,16 @@ struct PhoneConnections: Equatable {
         case .authorizedAlways, .authorizedWhenInUse: return .granted
         case .notDetermined: return .unknown
         case .denied, .restricted: return .denied
+        @unknown default: return .unknown
+        }
+    }
+
+    /// AUR-795: the record permission, read-only (`AVAudioApplication` on iOS 17+).
+    private static func microphoneState() -> PhoneConnectionState {
+        switch AVAudioApplication.shared.recordPermission {
+        case .granted: return .granted
+        case .denied: return .denied
+        case .undetermined: return .unknown
         @unknown default: return .unknown
         }
     }
@@ -172,6 +198,8 @@ struct PhoneConnections: Equatable {
             return (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])) ?? false
         case "location":
             return await LocationHelper.shared.requestWhenInUse()
+        case "microphone":
+            return await AVAudioApplication.requestRecordPermission()
         default:
             return false
         }
@@ -237,8 +265,15 @@ final class ClientToolBridge: ObservableObject {
 
     // MARK: State
 
-    /// The advertised set, in registry order, already filtered to the wire limits.
-    private(set) var entries: [Entry] = []
+    /// Everything the registry offered, in order, already filtered to the wire limits.
+    private var allEntries: [Entry] = []
+    /// AUR-795: how the bridge learns which rows the wearer switched OFF — injectable so tests
+    /// never touch UserDefaults.
+    var disabledToolsProvider: () -> Set<String> = { PhoneIntegrationStore.shared.disabledWireNames }
+    /// What is actually advertised: the wire-legal set MINUS the killed rows. A tool the wearer
+    /// switched off is never named to the brain (and `handleToolCall` answers `disabled:<row>` if
+    /// a call for it arrives from a stale manifest).
+    var entries: [Entry] { allEntries.filter { !disabledToolsProvider().contains($0.wireName) } }
     /// Where `aurelia.client_tools` / `aurelia.tool_result` go. The realtime service sets this to
     /// its own JSON send; tests capture it.
     var send: (([String: Any]) -> Void)?
@@ -277,6 +312,8 @@ final class ClientToolBridge: ObservableObject {
     /// the same kind is answered `permission_required:<kind>` at once, not prompted twice.
     private var promptingKinds: Set<String> = []
     private var appActiveObserver: NSObjectProtocol?
+    /// AUR-795: a Connections switch flipped while the call is live.
+    private var integrationsObserver: NSObjectProtocol?
     private var manifestTask: Task<Void, Never>?
 
     // MARK: Init
@@ -285,7 +322,7 @@ final class ClientToolBridge: ObservableObject {
          connectionsProvider: @escaping () async -> PhoneConnections = { await PhoneConnections.current() },
          pendingClipboard: PendingClipboard = .shared) {
         self.connectionsProvider = connectionsProvider
-        self.entries = Self.buildEntries(tools)
+        self.allEntries = Self.buildEntries(tools)
         // AUR-845: the clipboard's foreground re-apply reports back through the bridge.
         pendingClipboard.onApplied = { [weak self] event in self?.reportApplied(event) }
     }
@@ -402,6 +439,13 @@ final class ClientToolBridge: ObservableObject {
                 Task { @MainActor [weak self] in self?.refreshConnections(reason: "app active") }
             }
         }
+        if integrationsObserver == nil {
+            integrationsObserver = NotificationCenter.default.addObserver(
+                forName: PhoneIntegrationStore.didChange, object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.refreshConnections(reason: "connections changed") }
+            }
+        }
     }
 
     /// The socket is gone (drop, swap, hang-up): nothing can be answered on it — cancel what is
@@ -412,6 +456,10 @@ final class ClientToolBridge: ObservableObject {
         if let appActiveObserver {
             NotificationCenter.default.removeObserver(appActiveObserver)
             self.appActiveObserver = nil
+        }
+        if let integrationsObserver {
+            NotificationCenter.default.removeObserver(integrationsObserver)
+            self.integrationsObserver = nil
         }
         if !inFlight.isEmpty {
             ovLog("📱 client_tools: socket closed with \(inFlight.count) call(s) in flight — cancelled")
@@ -468,9 +516,16 @@ final class ClientToolBridge: ObservableObject {
             return
         }
         guard let entry = entries.first(where: { $0.wireName == name }) else {
-            ovLog("📱 tool_call \(name) \(id) → err unknown_tool")
-            sendResult(id: id, .failure("unknown_tool"), permissionState: nil)
-            record(id: id, wireName: name, .failure("unknown_tool"), ms: 0, permissionState: "n/a", late: false)
+            // AUR-795: told apart on purpose — a tool that EXISTS but whose Connections row is
+            // switched off is not "unknown", and the brain can say so ("выключено в Connections").
+            let known = allEntries.first { $0.wireName == name }
+            let code = known.map { e -> String in
+                let row = PhoneIntegration.owning(toolNamed: e.tool.name)?.rawValue ?? "connections"
+                return "disabled:\(row)"
+            } ?? "unknown_tool"
+            ovLog("📱 tool_call \(name) \(id) → err \(code)")
+            sendResult(id: id, .failure(code), permissionState: nil)
+            record(id: id, wireName: name, .failure(code), ms: 0, permissionState: "n/a", late: false)
             return
         }
         guard inFlight[id] == nil else {

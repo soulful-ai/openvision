@@ -200,6 +200,11 @@ enum PhoneStatusReader {
     /// read the location status ourselves to tell the two apart and name the fix.
     static func ssid(link: PhoneStatusSnapshot.Link) async -> (String?, PhoneStatusSnapshot.SSIDMiss?) {
         guard link == .wifi else { return (nil, .notWifi) }
+        // AUR-795: the Location row's kill switch is real — switched off, we do not even look.
+        let locationEnabled = await MainActor.run { PhoneIntegrationStore.shared.isEnabled(.location) }
+        guard locationEnabled else {
+            return (nil, .locationPermission)
+        }
         #if targetEnvironment(simulator)
         return (nil, .simulator)
         #else

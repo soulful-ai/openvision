@@ -225,6 +225,44 @@ answers everything else and names the missing piece.
 unreachable and the result carries `glasses battery unavailable (dat_0.4.0_no_public_accessor)`.
 `GlassesManager.glassesBatteryPercent` is the single place to fill in when a later DAT exposes it.
 
+## Connections — the screen IS the wire (AUR-795)
+
+`Settings → Connections` lists one row per integration: what she can do with it in one line, the
+live state, a **Connect** button (the OS prompt, or the account link), and a **kill switch**.
+
+The invariant that keeps it honest: **the switch state is what the wire carries.** Each row
+contributes exactly one key to `aurelia.client_tools.connections`, and a row that is switched off
+
+1. reports `off` on that key, and
+2. has its tools removed from the `tools` array of the manifest — the brain is never told about a
+   tool the wearer switched off.
+
+| Row | Tools | State values |
+|---|---|---|
+| Calendar | `phone.calendar` | granted / denied / unknown / off |
+| Reminders | `phone.create_reminder` | granted / denied / unknown / off |
+| Notifications | `phone.set_timer`, `phone.start_pomodoro` | granted / denied / unknown / off |
+| Location | *(none — unlocks the Wi-Fi name in `phone.status` and the place tag on notes)* | granted / denied / unknown / off |
+| Notes | `phone.note` | on / off |
+| Clipboard | `phone.copy_to_clipboard` | on / off |
+| My Documents | `phone.search_docs` | on / off |
+| Phone status | `phone.status` | on / off |
+| Shazam | `phone.shazam` | granted / denied / unknown / off (microphone) |
+| Spotify | `phone.spotify_*` | linked / unlinked / off |
+
+Apple Music and Shortcuts are on the plan (AUR-796) and deliberately have no row yet — a row that
+promises nothing is worse than no row.
+
+**Mid-call flips are honoured immediately.** `PhoneIntegrationStore` persists the off-set in
+UserDefaults (default: everything on, only explicit off-switches are stored, so a newly shipped
+integration is live without a migration) and posts `PhoneIntegrationStore.didChange`; the bridge
+observes it while a session is open and re-sends the manifest — the same rail AUR-836 uses when a
+permission prompt resolves.
+
+**A call for a switched-off tool is `disabled:<row>`, not `unknown_tool`** — the two mean different
+things to the brain: one is "you switched it off in Connections", the other is "that tool does not
+exist". A tool name that was never registered still answers `unknown_tool`.
+
 ## Privacy
 
 Notes are stored **in-app** (UserDefaults + Codable via `ContextualNoteStore`) — they are *not*
