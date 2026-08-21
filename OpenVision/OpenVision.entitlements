@@ -5,5 +5,34 @@
     <!-- increased-memory-limit entitlement removed 2026-08-14 for the DAT capture test build:
          it blocked the auto-provisioning profile, and the on-device Gemma VLM path is unused
          (backend = brain.intch.cc). Restore if local MLX models are needed. -->
+
+    <!-- AUR-845b: the SSID name in `phone.status`. Held back on 2026-08-21 morning because the app
+         was signing against the XC wildcard profile ("iOS Team Provisioning Profile: *"), which
+         carries no capabilities at all — adding this key failed the device build outright. The
+         explicit App ID `app.soulless.openvision` (4DUB6L4475, team 3JAHQ7PYLM) now exists WITH
+         Access Wi-Fi Information enabled, so the key can land: automatic signing has to pick the
+         explicit App ID to satisfy it, which is exactly what we want.
+         Key verified against Xcode's own capability bundle (ACCESS_WIFI_INFORMATION →
+         com.apple.developer.networking.wifi-info, BOOLEAN true), not from memory.
+         Without it NEHotspotNetwork.fetchCurrent() returns nil and PhoneStatusTool reports
+         ssidMiss: "entitlement" — the honest miss it was written to report. -->
+    <key>com.apple.developer.networking.wifi-info</key>
+    <true/>
+
+    <!-- ShazamKit has NO entitlement key to add here, and this is a measured fact, not an omission.
+         SHAZAM_KIT is enabled on the App ID (App Store Connect API, 2026-08-21:
+         bundleId 4DUB6L4475 → capabilities IN_APP_PURCHASE, SHAZAM_KIT, ACCESS_WIFI_INFORMATION),
+         but it is an App SERVICE, not a profile capability: the development profile Apple issued
+         MINUTES after the toggle ("iOS Team Provisioning Profile: app.soulless.openvision",
+         3481d879…) carries wifi-info and does NOT carry com.apple.developer.shazamkit. Adding the
+         key anyway fails the device build outright:
+           error: Entitlement com.apple.developer.shazamkit not found and could not be included in
+           profile. This likely is not a valid entitlement and should be removed from your
+           entitlements file.
+         Xcode 26.5 agrees — its own capability bundle (UserData/Capabilities) has 192 capabilities
+         and no SHAZAM_KIT among them, and the string "com.apple.developer.shazamkit" appears
+         nowhere in Xcode. ShazamKit is authorised server-side by bundle id via the App Service.
+         So: nothing to add, and ShazamTool's honest `shazam_failed:<code>` stays the truth-teller —
+         if catalog matching is still refused on device, THAT is the signal, not a missing key. -->
 </dict>
 </plist>

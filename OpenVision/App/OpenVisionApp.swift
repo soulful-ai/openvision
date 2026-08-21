@@ -70,6 +70,18 @@ struct OpenVisionApp: App {
     private func handleURL(_ url: URL) {
         print("[OpenVisionApp] Received URL: \(url)")
 
+        // AUR-845b: `openvision://` is now a shared scheme — Meta's app-link callback AND the
+        // Spotify OAuth redirect (openvision://spotify) both land on it. In the normal flow the
+        // Spotify one never reaches here: ASWebAuthenticationSession intercepts its own
+        // callbackURLScheme before the system routes the open. But "normal" is doing a lot of work
+        // in that sentence (a stale sheet, a link re-opened from Safari history, a cold launch),
+        // and handing an OAuth callback — code and all — to `Wearables.handleUrl` would be a
+        // confusing failure at best. So the Spotify host is claimed explicitly and dropped here.
+        if url.host?.lowercased() == "spotify" {
+            print("[OpenVisionApp] spotify callback outside ASWebAuthenticationSession — ignored")
+            return
+        }
+
         Task {
             do {
                 _ = try await Wearables.shared.handleUrl(url)
