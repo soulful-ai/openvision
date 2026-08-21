@@ -228,6 +228,101 @@ final class ShazamSpotifyToolsTests: XCTestCase {
         } catch { XCTFail("wrong error: \(error)") }
     }
 
+    // MARK: - AUR-793c: a listen must never take the call down with it
+
+    /// THE regression test. Field, 2026-08-21 12:27Z (rt_4) and 12:30Z (rt_5): both sessions
+    /// `appState:"background"`, both `code:1006` the instant the window opened, both
+    /// `error:"session_closed"` mid-listen, and the wearer heard nothing at all. Cause: the window
+    /// stopped the call's shared engine (the only way to switch voice processing off), which ends
+    /// the app's audio IO — and an app alive in the background on the `audio` background mode is
+    /// suspended the moment its audio IO stops. So: with a live rig, the window must leave the
+    /// engine RUNNING and the category untouched.
+    func testMusicWindowNeverStopsALiveCallEngine() throws {
+        let manager = AudioSessionManager.shared
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playAndRecord, mode: .voiceChat,
+                                options: [.defaultToSpeaker, .allowBluetoothA2DP])
+        // A live rig, without needing a real microphone on the test host: the window's whole
+        // decision hangs on this one probe.
+        manager.liveRigProbe = { true }
+        defer { manager.liveRigProbe = { AudioSessionManager.shared.sharedEngine?.isRunning == true } }
+        let engine = try? manager.startSharedEngine(voiceProcessing: false)
+        defer { manager.stopSharedEngine() }
+        let categoryBefore = session.category, modeBefore = session.mode, optionsBefore = session.categoryOptions
+
+        let window = manager.beginMusicWindow()
+        XCTAssertEqual(window.style, .inCall, "a live rig means the listen takes what it can get")
+        if let engine { XCTAssertTrue(engine.isRunning, "STOPPING THIS ENGINE SUSPENDS THE APP AND KILLS THE SOCKET") }
+        XCTAssertEqual(session.category, categoryBefore, "no category change while a call is live")
+        XCTAssertEqual(session.mode, modeBefore, "changing the mode drops the glasses' HFP output mid-sentence")
+        XCTAssertEqual(session.categoryOptions, optionsBefore)
+        XCTAssertFalse(window.enginePaused)
+
+        manager.endMusicWindow(window)
+        if let engine { XCTAssertTrue(engine.isRunning, "and it is still running afterwards — the call never noticed") }
+        XCTAssertFalse(manager.musicWindowActive)
+        XCTAssertEqual(session.category, categoryBefore)
+        XCTAssertEqual(session.mode, modeBefore)
+    }
+
+    /// An in-call listen tells the truth about the capture it got: the call's voice processing owns
+    /// the input hardware, so `vp=on` even though OUR node asked for it off.
+    func testInCallConditionsReportTheCallsVoiceProcessing() {
+        var c = AudioSessionManager.shared.musicCaptureConditions(sampleRate: 24_000,
+                                                                  voiceProcessing: true,
+                                                                  style: .inCall)
+        c.peakDbfs = -30          // the level is filled in at the end of the listen
+        XCTAssertEqual(c.noMatchCode, "no_match:voice_processed")
+        XCTAssertTrue(c.wire.contains("w=inCall"), c.wire)
+        XCTAssertTrue(c.wire.contains("vp=on"), c.wire)
+    }
+
+    /// A result the socket could not carry is banked and handed to the NEXT call — the work is not
+    /// repeated and the failure string survives the drop.
+    func testAnUndeliveredResultIsHandedToTheNextListen() async throws {
+        ShazamLastMatch.shared.clear()
+        let bridge = ClientToolBridge(tools: NativeToolRegistry.shared.allTools,
+                                      connectionsProvider: { PhoneConnections() },
+                                      pendingClipboard: PendingClipboard(notifier: ClipboardToolTests.FakeNotifier(),
+                                                                         appState: { .active }))
+        bridge.bankUndelivered("phone.shazam", .failure("no_match:voice_processed mic=phone vp=on"))
+        // The next listen answers from the bank without touching the microphone at all.
+        let listener = FakeListener(.noMatch(.phone()))
+        let tool = ShazamTool(listener: listener, earcon: {}, earconStop: {})
+        do {
+            _ = try await tool.execute(args: [:])
+            XCTFail("the banked failure must be re-thrown")
+        } catch let e as NativeToolError {
+            XCTAssertEqual(e.wireCode, "no_match:voice_processed mic=phone vp=on")
+            XCTAssertNil(listener.listenedSeconds, "it must not listen again — the answer is already known")
+        }
+        // One delivery only: the slot is empty now.
+        let tool2 = ShazamTool(listener: FakeListener(.match(match, .phone())), earcon: {}, earconStop: {})
+        _ = try await tool2.execute(args: [:])
+    }
+
+    /// A banked answer goes stale — a different song may be playing by then.
+    func testAStaleBankedAnswerIsNotDelivered() async throws {
+        ShazamLastMatch.shared.clear()
+        ShazamLastMatch.shared.bank(.init(result: "Shazam: «Old»", code: nil, spoken: nil,
+                                          at: Date().addingTimeInterval(-ShazamLastMatch.undeliveredWindow - 5)))
+        let listener = FakeListener(.match(match, .phone()))
+        let out = try await ShazamTool(listener: listener, earcon: {}, earconStop: {}).execute(args: [:])
+        XCTAssertTrue(out.contains("Bohemian Rhapsody"), out)
+        XCTAssertNotNil(listener.listenedSeconds, "a stale bank means listen again")
+    }
+
+    /// Both cues fire — the wearer hears the listen start and stop even when the answer is slow.
+    func testBothEarconsFire() async throws {
+        ShazamLastMatch.shared.clear()
+        var started = false, stopped = false
+        let tool = ShazamTool(listener: FakeListener(.noMatch(.phone())),
+                              earcon: { started = true }, earconStop: { stopped = true })
+        _ = try? await tool.execute(args: [:])
+        XCTAssertTrue(started, "he must hear that she started listening")
+        XCTAssertTrue(stopped, "…and that she stopped — never an unexplained silence")
+    }
+
     // MARK: - AUR-793b: the listen outlives the socket
 
     /// Field call 1 (2026-08-21 12:03Z): the socket died 6.2 s into an 8-s listen (WS 1006) and the
@@ -291,6 +386,7 @@ final class ShazamSpotifyToolsTests: XCTestCase {
 
         let window = manager.beginMusicWindow()
         XCTAssertTrue(manager.musicWindowActive)
+        XCTAssertEqual(window.style, .exclusive)
         XCTAssertEqual(window.category, .playAndRecord)
         XCTAssertEqual(window.mode, .voiceChat, "the snapshot must remember the mode it displaced")
         XCTAssertEqual(window.options, established)
@@ -319,8 +415,8 @@ final class ShazamSpotifyToolsTests: XCTestCase {
         XCTAssertNil(manager.sharedEngine, "this test assumes no realtime rig is up")
 
         let window = manager.beginMusicWindow()
-        XCTAssertFalse(window.enginePaused)
-        XCTAssertFalse(window.voiceProcessingWas)
+        XCTAssertEqual(window.style, .exclusive, "no live rig — the session is ours to shape")
+        XCTAssertFalse(window.callVoiceProcessing)
         manager.endMusicWindow(window)
 
         XCTAssertEqual(session.category, .playback)
@@ -331,11 +427,12 @@ final class ShazamSpotifyToolsTests: XCTestCase {
     func testConditionsReportTheTapNotThePreferredValues() {
         let c = AudioSessionManager.shared.musicCaptureConditions(sampleRate: 48_000,
                                                                   voiceProcessing: false,
-                                                                  callPaused: true)
+                                                                  style: .exclusive)
         XCTAssertEqual(c.sampleRate, 48_000)
         XCTAssertFalse(c.voiceProcessing)
-        XCTAssertTrue(c.callPaused)
-        XCTAssertTrue(c.wire.contains("call=paused"), c.wire)
+        XCTAssertEqual(c.style, "exclusive")
+        XCTAssertTrue(c.wire.contains("w=exclusive"), c.wire)
+        XCTAssertTrue(c.wire.contains("app="), c.wire)
         XCTAssertFalse(c.category.hasPrefix("AVAudioSessionCategory"), "the wire wants the short name: \(c.category)")
     }
 

@@ -79,8 +79,12 @@ struct MusicCaptureConditions: Equatable {
     var peakDbfs: Double = -120
     /// The full route tag, e.g. "hfp+phone-mic".
     var route = ""
-    /// True when the live call's own capture was paused so the listen could have a clean mic.
-    var callPaused = false
+    /// How the listen got its mic: "exclusive" (no call — the session was ours to shape) or
+    /// "inCall" (a call was live, so only the input port was moved). AUR-793c.
+    var style = "exclusive"
+    /// The app's foreground state during the listen. Field-critical: a background listen is the
+    /// one that used to take the socket down with it.
+    var appState = "unknown"
 
     /// Below this peak nothing audible reached the mic — a no-match here is not Shazam's verdict.
     static let silenceFloorDbfs = -55.0
@@ -90,7 +94,7 @@ struct MusicCaptureConditions: Equatable {
     /// One compact line for the wire and the log (≤96 chars).
     var wire: String {
         "mic=\(mic) rate=\(Int(sampleRate)) vp=\(voiceProcessing ? "on" : "off") mode=\(mode)"
-        + " lvl=\(Int(peakDbfs.rounded()))dBFS route=\(route)\(callPaused ? " call=paused" : "")"
+        + " lvl=\(Int(peakDbfs.rounded()))dBFS route=\(route) w=\(style) app=\(appState)"
     }
 
     /// Why a no-match could not have worked — most decisive first. `nil` means the capture WAS
@@ -127,19 +131,19 @@ struct MusicCaptureConditions: Equatable {
     static func phone(rate: Double = 48_000, peakDbfs: Double = -25) -> MusicCaptureConditions {
         MusicCaptureConditions(mic: "phone", category: "playAndRecord", mode: "measurement",
                                voiceProcessing: false, sampleRate: rate, peakDbfs: peakDbfs,
-                               route: "speaker+phone-mic", callPaused: true)
+                               route: "speaker+phone-mic", style: "exclusive", appState: "active")
     }
     /// Test seam: the rig the field failure actually ran on.
     static func voiceProcessedPhone() -> MusicCaptureConditions {
         MusicCaptureConditions(mic: "phone", category: "playAndRecord", mode: "voiceChat",
                                voiceProcessing: true, sampleRate: 24_000, peakDbfs: -30,
-                               route: "hfp+phone-mic")
+                               route: "hfp+phone-mic", style: "inCall", appState: "background")
     }
     /// Test seam: the glasses' HFP mic.
     static func glasses() -> MusicCaptureConditions {
         MusicCaptureConditions(mic: "glasses", category: "playAndRecord", mode: "voiceChat",
                                voiceProcessing: false, sampleRate: 16_000, peakDbfs: -30,
-                               route: "hfp+bt-mic")
+                               route: "hfp+bt-mic", style: "inCall", appState: "background")
     }
 }
 
@@ -158,7 +162,34 @@ final class ShazamLastMatch {
     static let shared = ShazamLastMatch()
     private(set) var last: ShazamMatch?
     func set(_ m: ShazamMatch) { last = m }
-    func clear() { last = nil }
+    func clear() { last = nil; undelivered = nil }
+
+    /// AUR-793c — a listen whose answer could never be written to the wire because the socket died
+    /// mid-capture. The work is real and so are the diagnostics; the only thing missing is a live
+    /// wire. It is banked here and handed to the NEXT `phone.shazam` call instead of listening
+    /// again, which is both faster and the only way the failure string survives a session drop.
+    struct Undelivered: Equatable {
+        /// The result text of a successful listen, or nil for a failure.
+        let result: String?
+        /// The wire code (with its conditions) of a failed listen, or nil for a success.
+        let code: String?
+        /// The sentence for the wearer on a failure.
+        let spoken: String?
+        var at = Date()
+    }
+
+    private(set) var undelivered: Undelivered?
+    /// Older than this and it is history, not an answer — a different song may be playing.
+    static let undeliveredWindow: TimeInterval = 90
+
+    func bank(_ u: Undelivered) { undelivered = u }
+
+    /// Take the banked answer if it is still fresh; clears the slot either way (one delivery only).
+    func takeFresh(now: Date = Date()) -> Undelivered? {
+        defer { undelivered = nil }
+        guard let u = undelivered, now.timeIntervalSince(u.at) <= Self.undeliveredWindow else { return nil }
+        return u
+    }
 }
 
 // MARK: - Listener seam (tests inject; the app uses ShazamKit)
@@ -262,16 +293,11 @@ final class ShazamMatchCollector: NSObject, SHSessionDelegate, @unchecked Sendab
 /// hand every buffer to ShazamKit, and report BOTH the verdict and the conditions it ran under.
 enum MusicListen {
 
-    /// The live call's playout tail gets this long to drain before the rig is paused, so a short
-    /// «Уже слушаю» is not chopped mid-word by the window opening.
-    static let playoutGraceSeconds = 0.35
-
     @MainActor
     static func run(seconds: Double) async -> ShazamOutcome {
+        // AUR-793c: no drain, no pause. The call keeps playing and keeps capturing throughout —
+        // the previous cut stopped the shared engine here and iOS suspended the whole app.
         let manager = AudioSessionManager.shared
-        if manager.sharedEngine?.isRunning == true {
-            try? await Task.sleep(nanoseconds: UInt64((manager.playoutTailSeconds + playoutGraceSeconds) * 1_000_000_000))
-        }
         let window = manager.beginMusicWindow()
         defer { manager.endMusicWindow(window) }
 
@@ -283,9 +309,12 @@ enum MusicListen {
         catch { ovLog("🎧 shazam: could not disable voice processing on the listen engine: \(error)") }
 
         let format = input.outputFormat(forBus: 0)
-        var conditions = manager.musicCaptureConditions(sampleRate: format.sampleRate,
-                                                        voiceProcessing: input.isVoiceProcessingEnabled,
-                                                        callPaused: window.enginePaused)
+        // `voiceProcessing` is the honest OR: our own node's setting, plus the call's VPIO unit,
+        // which owns the input hardware for the whole session while a call is live.
+        var conditions = manager.musicCaptureConditions(
+            sampleRate: format.sampleRate,
+            voiceProcessing: input.isVoiceProcessingEnabled || (window.style == .inCall && window.callVoiceProcessing),
+            style: window.style)
         guard format.sampleRate > 0, format.channelCount > 0 else {
             ovLog("🎧 shazam ✘ mic_unavailable [\(conditions.wire)]")
             return .failed(code: "mic_unavailable",
@@ -378,15 +407,28 @@ struct ShazamTool: NativeTool {
 
     /// Seams: the listener and the START earcon (tests inject both).
     var listener: ShazamListening = SystemShazamListener()
-    var earcon: @MainActor () -> Void = { SoundService.shared.playAlert() }
+    /// AUR-793c: the START cue rides the CALL's engine, so it comes out of the glasses he is
+    /// wearing rather than the phone in his pocket. He must never be left wondering whether
+    /// anything happened — `spoken:""` with a cancelled turn was the unacceptable state.
+    var earcon: @MainActor () -> Void = {
+        let engine = AudioSessionManager.shared.sharedEngine
+        Task { await CallEarconService.shared.play(.audioStart, on: engine) }
+    }
+    /// The matching "I stopped listening" cue, so the gap before she speaks is explained.
+    var earconStop: @MainActor () -> Void = {
+        let engine = AudioSessionManager.shared.sharedEngine
+        Task { await CallEarconService.shared.play(.audioStop, on: engine) }
+    }
     var remember: @MainActor (ShazamMatch) -> Void = { ShazamLastMatch.shared.set($0) }
 
     init() {}
     init(listener: ShazamListening,
          earcon: @escaping @MainActor () -> Void = {},
+         earconStop: @escaping @MainActor () -> Void = {},
          remember: @escaping @MainActor (ShazamMatch) -> Void = { ShazamLastMatch.shared.set($0) }) {
         self.listener = listener
         self.earcon = earcon
+        self.earconStop = earconStop
         self.remember = remember
     }
 
@@ -417,10 +459,23 @@ struct ShazamTool: NativeTool {
     }
 
     func execute(args: [String: Any]) async throws -> String {
+        // AUR-793c: an answer from a listen whose socket died is delivered on the next call, on the
+        // wire that exists, instead of being re-listened for.
+        if let banked = await MainActor.run(resultType: ShazamLastMatch.Undelivered?.self, body: { ShazamLastMatch.shared.takeFresh() }) {
+            if let result = banked.result {
+                ovLog("🎧 shazam ↩ delivering the answer from the listen the socket cut off")
+                return "\(result) [из прерванной попытки]"
+            }
+            ovLog("🎧 shazam ↩ delivering the FAILURE from the listen the socket cut off: \(banked.code ?? "?")")
+            throw NativeToolError.failed(code: banked.code ?? "no_match",
+                                         spoken: banked.spoken ?? "Не узнала трек.")
+        }
         let seconds = Self.seconds(from: args)
         await MainActor.run { earcon() }            // START earcon: she is listening NOW
         ovLog("🎧 shazam ▶ listening \(Int(seconds)) s")
-        switch await listener.listen(seconds: seconds) {
+        let outcome = await listener.listen(seconds: seconds)
+        await MainActor.run { earconStop() }        // …and she has stopped: the gap is explained
+        switch outcome {
         case .match(let match, let conditions):
             await MainActor.run { remember(match) }
             ovLog("🎧 shazam ✔ \(match.title) [\(conditions.wire)]")

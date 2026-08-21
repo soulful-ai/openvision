@@ -286,6 +286,19 @@ final class ClientToolBridge: ObservableObject {
     var permissionRequester: (String) async -> Bool = { await PhoneConnections.requestPermission(kind: $0) }
     /// How the bridge reads the app's foreground state (AUR-837) — injectable.
     var appStateProvider: () -> AppForegroundState = { AppForegroundState.current() }
+    /// AUR-793c: what to do with a finished result that can never be written to its own session.
+    /// A `phone.shazam` outcome is banked, so the NEXT listen hands it over instead of repeating
+    /// work — and the failure string survives the session drop. Injectable for the tests.
+    var bankUndelivered: (String, ClientToolOutcome) -> Void = { wireName, outcome in
+        guard wireName == "\(ClientToolBridge.namePrefix)shazam" else { return }
+        switch outcome {
+        case .success(let text):
+            ShazamLastMatch.shared.bank(.init(result: text, code: nil, spoken: nil))
+        case .failure(let code):
+            ShazamLastMatch.shared.bank(.init(result: nil, code: code,
+                                              spoken: "Не узнала трек — связь оборвалась во время прослушивания."))
+        }
+    }
     /// Last connections snapshot that went out (Settings → Debug shows it).
     private(set) var lastSentConnections: PhoneConnections?
     private(set) var lastManifestSentAt: Date?
@@ -702,6 +715,7 @@ final class ClientToolBridge: ObservableObject {
         record(id: id, wireName: work.wireName, outcome, ms: ms, permissionState: permState, late: work.late,
                deferred: deferred)
         guard isSessionActive, work.generation == sessionGeneration else {
+            bankUndelivered(work.wireName, outcome)
             // AUR-793b: the socket went before the answer did. The work is NOT lost — a `shazam`
             // match is banked in `ShazamLastMatch`, so «включи её» has its antecedent in the next
             // session. No `client_tool.applied` frame goes out for it: the server SPEAKS every
