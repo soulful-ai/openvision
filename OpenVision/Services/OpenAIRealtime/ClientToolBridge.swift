@@ -149,6 +149,7 @@ struct PhoneConnections: Equatable {
         c.location = locationState()
         c.microphone = microphoneState()
         c.disabled = await MainActor.run { PhoneIntegrationStore.shared.disabled }
+        c.spotify = await MainActor.run { SpotifyConnection.shared.wireState }
         return c
     }
 
@@ -251,7 +252,9 @@ final class ClientToolBridge: ObservableObject {
     static let maxResultChars = 1024
     static let defaultTimeoutMs = 8000
     /// Registry-name → timeout override. Document search reads + ranks chunks; give it room.
-    static let timeoutOverrides: [String: Int] = ["search_docs": 15000]
+    /// AUR-793: `shazam` LISTENS for 6-12 s by design — the 8-s default would kill it mid-listen,
+    /// so it gets the listen window plus the catalog round-trip.
+    static let timeoutOverrides: [String: Int] = ["search_docs": 15000, "shazam": 20000]
     static let minTimeoutMs = 500
     static let maxTimeoutMs = 60_000
     static let recentCallsKept = 10
@@ -320,11 +323,15 @@ final class ClientToolBridge: ObservableObject {
 
     init(tools: [NativeTool],
          connectionsProvider: @escaping () async -> PhoneConnections = { await PhoneConnections.current() },
-         pendingClipboard: PendingClipboard = .shared) {
+         pendingClipboard: PendingClipboard = .shared,
+         pendingSpotify: PendingSpotifyPlay = .shared) {
         self.connectionsProvider = connectionsProvider
         self.allEntries = Self.buildEntries(tools)
-        // AUR-845: the clipboard's foreground re-apply reports back through the bridge.
+        // AUR-845: a deferred effect's landing reports back through the bridge — the clipboard's
+        // foreground re-apply, and (AUR-793) the Spotify play that had to wait for the app to be
+        // in front before it could launch Spotify.
         pendingClipboard.onApplied = { [weak self] event in self?.reportApplied(event) }
+        pendingSpotify.onApplied = { [weak self] event in self?.reportApplied(event) }
     }
 
     // MARK: Manifest

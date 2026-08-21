@@ -109,6 +109,10 @@ enum NativeToolError: LocalizedError, Equatable {
             default: return "I need \(kind) access — enable it in Settings, then ask again."
             }
         case .notLinked(let service):
+            // AUR-793: Spotify has a Connections row to send the wearer to — name it, in his language.
+            if service == "spotify" {
+                return "Spotify не подключён — открой Connections в настройках и подключи."
+            }
             return "\(service.capitalized) isn't linked yet — connect it in Settings, then ask again."
         case .failed(_, let spoken):
             return spoken
@@ -136,6 +140,11 @@ final class NativeToolRegistry {
             ClipboardTool(),
             DocumentSearchTool(),
             PhoneStatusTool(),
+            ShazamTool(),
+            SpotifyPlayTool(),
+            SpotifyLikeTool(),
+            SpotifyNowPlayingTool(),
+            SpotifyControlTool(),
         ]
         var map: [String: NativeTool] = [:]
         for t in all { map[t.name] = t }

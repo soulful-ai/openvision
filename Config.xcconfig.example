@@ -19,3 +19,12 @@ CLIENT_TOKEN = AR|YOUR_META_APP_ID|YOUR_CLIENT_TOKEN
 // URL scheme for Meta AI app callback
 // Must match bundle identifier (replace dots with hyphens if needed)
 APP_LINK_URL_SCHEME = openvision
+
+// Spotify OAuth client id (AUR-793) — optional.
+// Create the app at developer.spotify.com/dashboard:
+//   App name:      OpenVision (Aurelia)
+//   Redirect URI:  openvision://spotify        <- must match APP_LINK_URL_SCHEME above
+//   APIs:          Web API
+// Then paste the Client ID here. A PKCE public client needs NO client secret on the device.
+// Leave empty and every phone.spotify_* tool honestly answers "not linked".
+SPOTIFY_CLIENT_ID =

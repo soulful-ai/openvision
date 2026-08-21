@@ -61,11 +61,22 @@
         </dict>
     </array>
 
-    <!-- Queried URL Schemes (Meta AI app) -->
+    <!-- Queried URL Schemes (Meta AI app, Spotify) -->
     <key>LSApplicationQueriesSchemes</key>
     <array>
         <string>fb-viewapp</string>
+        <!-- AUR-793: canOpenURL("spotify://") before launching Spotify for the deferred play. -->
+        <string>spotify</string>
     </array>
+
+    <!-- AUR-793: Spotify OAuth (PKCE public client — the id is per-developer, not a secret, and
+         lives in the gitignored Config.xcconfig exactly like META_APP_ID). Empty until the
+         developer app exists; every phone.spotify_* tool then answers not_linked:spotify. -->
+    <key>SpotifyClientID</key>
+    <string>$(SPOTIFY_CLIENT_ID)</string>
+    <!-- The redirect URI is built from this: <scheme>://spotify -->
+    <key>AppLinkURLScheme</key>
+    <string>$(APP_LINK_URL_SCHEME)</string>
 
     <!-- Required Device Capabilities -->
     <key>UIRequiredDeviceCapabilities</key>

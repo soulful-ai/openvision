@@ -16,6 +16,8 @@ the model only decides *when* to call a tool and *with what arguments*; the tool
 | Note | `note` | UserDefaults + CoreLocation | `save` / `search` / `list` / `delete`, auto-tagged with place + time |
 | Clipboard | `copy_to_clipboard` | UIPasteboard | Foreground-only write; queued + re-applied when backgrounded — see [Deferred effects](#deferred-effects--the-clipboard-and-the-wire-the-server-half-is-coded-against-aur-845) |
 | Phone status | `status` | UIDevice / Network / NetworkExtension / ProcessInfo | Battery, link type, thermal, free storage — see [Phone status](#phone-status-aur-794) |
+| Shazam | `shazam` | ShazamKit | 6-12 s listen on the **phone** mic — see [Shazam → Spotify](#shazam--spotify-aur-793) |
+| Spotify | `spotify_play` · `spotify_like` · `spotify_now_playing` · `spotify_control` | Spotify Web API (OAuth PKCE) | Honest `not_linked:spotify` until the account is linked |
 
 > There is intentionally **no alarm tool**. iOS gives third-party apps no API to create alarms in
 > the Clock app, and a plain notification is a poor substitute for a wake-up alarm. Use a reminder
@@ -262,6 +264,70 @@ permission prompt resolves.
 **A call for a switched-off tool is `disabled:<row>`, not `unknown_tool`** — the two mean different
 things to the brain: one is "you switched it off in Connections", the other is "that tool does not
 exist". A tool name that was never registered still answers `unknown_tool`.
+
+## Shazam → Spotify (AUR-793)
+
+«Аурелия, что за песня?» → START earcon → 6-12 s listen → «Это Queen — Bohemian Rhapsody» →
+«включи её» → «лайкни». Two halves with very different readiness:
+
+### `phone.shazam` — works with no account at all
+
+ShazamKit matches against Apple's catalog on device; there is no login and no key of ours.
+
+**It listens on the PHONE mic, on purpose.** When the glasses mic is open the route is HFP —
+8 kHz narrowband, speech-shaped, with the far end's AGC on top. Shazam matches a spectral
+fingerprint of the original recording, which narrowband voice audio does not carry, so a match on
+the glasses mic fails reliably. The tool therefore sets the audio session's preferred input to the
+built-in mic for the duration and restores the previous preference afterwards. If there is no
+built-in mic to switch to (or the switch fails) it listens on the current route and **says so** —
+the result carries `mic: glasses`, and a no-match on that mic explains itself
+(«слушала через микрофон очков… достань телефон»), because that is something the wearer can act on.
+
+A no-match is `ok:false, error: no_match` — never `ok:true` for "nothing happened" (the AUR-833
+rule). The tool gets a 20-s wire timeout (`timeoutOverrides`), since the 8-s default would cut a
+12-s listen in half. The match is kept in `ShazamLastMatch` so «включи её» has an antecedent without
+the model having to carry an id.
+
+**One human step, once:** developer.apple.com → Identifiers → `app.soulless.openvision` →
+App Services → **ShazamKit** → Save. Until then a match attempt comes back as an SHError and the
+tool reports it (`shazam_failed:202`) instead of pretending it heard nothing. The
+`com.apple.developer.shazamkit` entitlement key is deliberately **not committed** — an entitlement
+the wildcard team provisioning profile does not carry fails the device build outright (verified with
+the Wi-Fi-info key, 2026-08-21), so it goes in together with the portal toggle, never before it.
+
+### `phone.spotify_*` — waits on a developer app that does not exist yet
+
+There is no Spotify client id, so `SpotifyConfig.isConfigured` is false, the connection reports
+`unlinked`, and **every** Spotify tool answers `not_linked:spotify` with «Spotify не подключён —
+открой Connections в настройках и подключи». Never a fake `ok`.
+
+**The five minutes that turn it on** (developer.spotify.com):
+
+1. Log in → **Dashboard** → **Create app**.
+2. App name: `OpenVision (Aurelia)` · description: anything.
+3. **Redirect URI**: `openvision://spotify` — exactly this, then **Add**.
+4. Which API/SDKs: tick **Web API**.
+5. Save → open the app → **Settings** → copy the **Client ID**.
+6. Paste it into `Config.xcconfig` as `SPOTIFY_CLIENT_ID = <id>` (gitignored — the id is not a
+   secret for a PKCE public client, but it is per-developer), rebuild.
+7. On the phone: Settings → Connections → Spotify → **Connect** → the Spotify login sheet → Agree.
+
+No client **secret** is ever needed or stored: the link is Authorization Code + PKCE (S256), and the
+tokens live in the Keychain (never UserDefaults). Scopes requested: `user-read-playback-state`,
+`user-modify-playback-state`, `user-read-currently-playing`, `user-library-modify`,
+`user-library-read` — the minimum for play / pause / next / volume / now-playing / like.
+
+Why the Web API and not the iOS SDK's App Remote: App Remote needs the Spotify app running and ships
+as a binary framework to vendor; the Web API does search / play / like / now-playing / transport over
+plain HTTPS and keeps working while our app is backgrounded — which a glasses call always is.
+
+**The one thing the Web API cannot do is create a playback device.** With Spotify not open anywhere,
+`PUT /me/player/play` answers `404 NO_ACTIVE_DEVICE`, and launching the Spotify app requires *our*
+app to be frontmost. That is the AUR-845 deferred-effect case, handled as one: backgrounded,
+`phone.spotify_play` answers `ok:true, deferred:true` with «Включу, как только откроешь приложение»,
+queues the uri, and on the next `didBecomeActive` opens Spotify, starts the track and sends
+`aurelia.client_tool.applied` with the same frame shape as the queued clipboard write
+(`verifiedByReadback:false` — a playback start is confirmed by Spotify's own 204, not a read-back).
 
 ## Privacy
 

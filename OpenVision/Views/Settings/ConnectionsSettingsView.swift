@@ -95,6 +95,18 @@ struct ConnectionsSettingsView: View {
                         .disabled(connecting == integration.rawValue)
                 }
                 Spacer()
+                if integration == .spotify, SpotifyConnection.shared.isLinked {
+                    Button("Unlink") {
+                        SpotifyConnection.shared.disconnect()
+                        Task {
+                            await refresh()
+                            bridge.refreshConnections(reason: "spotify unlinked")
+                        }
+                    }
+                    .font(.caption)
+                    .buttonStyle(.borderless)
+                    .foregroundColor(.orange)
+                }
                 Toggle("", isOn: Binding(
                     get: { store.isEnabled(integration) },
                     set: { store.setEnabled(integration, $0) }
@@ -137,9 +149,20 @@ struct ConnectionsSettingsView: View {
         }
 
         if integration.linkService == "spotify" {
-            // AUR-793 lands the OAuth flow in the next commit; until then the row says what is
-            // missing instead of pretending to link.
-            notes[integration.rawValue] = "Spotify: OAuth ещё не настроен (AUR-793)."
+            // AUR-793: the real PKCE link. It needs the app frontmost (a browser sheet), which is
+            // why linking lives here and never inside a tool call.
+            if let blocker = SpotifyConnection.shared.blocker {
+                notes[integration.rawValue] = blocker
+                return
+            }
+            do {
+                try await SpotifyConnection.shared.connect()
+                await refresh()
+                bridge.refreshConnections(reason: "spotify linked")
+            } catch {
+                notes[integration.rawValue] = (error as? SpotifyError)?.errorDescription
+                    ?? error.localizedDescription
+            }
             return
         }
     }
