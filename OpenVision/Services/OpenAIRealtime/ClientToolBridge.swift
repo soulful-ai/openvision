@@ -39,6 +39,18 @@
 //                    while the prompt is up (a prompt is not a slow tool).
 // AUR-837 — observability: every result carries `appState` + `permissionState`; the bridge keeps
 // the last 10 calls for the Debug → Phone tools read-out; the log line carries appState.
+// AUR-845 — deferred effects are told as such, and their landing is reported:
+//   client → server   aurelia.tool_result {…, ok:true, deferred:true}  — the tool accepted the call
+//                     but iOS defers the effect (a clipboard write from the background); the
+//                     `result` text says so («Скопирую, как только откроешь приложение: …»).
+//   client → server   aurelia.client_tool.applied {id:"<the tool_call id>", tool:"phone.copy_to_clipboard",
+//                     ok:true|false, verifiedByReadback:true|false,
+//                     stage:"foreground"|"active"|"manual", queuedMs:<int>, appState:"active",
+//                     chars:<int>} — sent once when the queued effect is finished (verified on
+//                     read-back when the app came to the front, or, on `didBecomeActive`, the
+//                     final failure). Only while a session is open; otherwise logged + kept in the
+//                     Debug read-out. The server half (log / speak «скопировано») is not here —
+//                     see docs/native-tools.md § "Deferred effects".
 
 import Foundation
 import EventKit
@@ -162,9 +174,17 @@ struct ClientToolCallRecord: Identifiable, Equatable {
     let permissionState: String
     let late: Bool
     let at: Date
+    /// AUR-845: `ok` but the effect lands later (`aurelia.tool_result.deferred:true`).
+    var deferred: Bool = false
+    /// AUR-845: this row IS the later landing (`aurelia.client_tool.applied`), not a call.
+    var applied: Bool = false
 
     var shortName: String { wireName.hasPrefix(ClientToolBridge.namePrefix) ? String(wireName.dropFirst(ClientToolBridge.namePrefix.count)) : wireName }
-    var statusText: String { ok ? (late ? "ok (late)" : "ok") : "err \(error ?? "?")" }
+    var statusText: String {
+        if applied { return ok ? "applied" : "err \(error ?? "not_applied")" }
+        if ok { return deferred ? "ok (deferred)" : (late ? "ok (late)" : "ok") }
+        return "err \(error ?? "?")"
+    }
 }
 
 // MARK: - Bridge
@@ -240,9 +260,12 @@ final class ClientToolBridge: ObservableObject {
     // MARK: Init
 
     init(tools: [NativeTool],
-         connectionsProvider: @escaping () async -> PhoneConnections = { await PhoneConnections.current() }) {
+         connectionsProvider: @escaping () async -> PhoneConnections = { await PhoneConnections.current() },
+         pendingClipboard: PendingClipboard = .shared) {
         self.connectionsProvider = connectionsProvider
         self.entries = Self.buildEntries(tools)
+        // AUR-845: the clipboard's foreground re-apply reports back through the bridge.
+        pendingClipboard.onApplied = { [weak self] event in self?.reportApplied(event) }
     }
 
     // MARK: Manifest
@@ -507,11 +530,14 @@ final class ClientToolBridge: ObservableObject {
     private func runBody(id: String, tool: NativeTool, late: Bool) {
         guard let work = inFlight[id] else { return }
         let args = work.args
+        let call = NativeToolCall(id: id, wireName: work.wireName)
         let exec = Task { [weak self] in
             let outcome: Outcome
+            var deferred = false
             do {
-                let text = try await tool.execute(args: args)
-                outcome = .success(text)
+                let reply = try await tool.execute(args: args, call: call)
+                outcome = .success(reply.text)
+                deferred = reply.deferred
             } catch let typed as NativeToolError {
                 outcome = .failure(typed.wireCode)
             } catch is CancellationError {
@@ -519,7 +545,7 @@ final class ClientToolBridge: ObservableObject {
             } catch {
                 outcome = .failure(Self.shortError(error))
             }
-            await self?.finish(id: id, outcome)
+            await self?.finish(id: id, outcome, deferred: deferred)
         }
         let timeout = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(work.timeoutMs) * 1_000_000)
@@ -547,7 +573,8 @@ final class ClientToolBridge: ObservableObject {
     }
 
     /// First writer wins: remove the in-flight record, free the name, answer the wire, log.
-    private func finish(id: String, _ outcome: Outcome) {
+    /// `deferred` (AUR-845): the tool accepted the call, the effect lands later.
+    private func finish(id: String, _ outcome: Outcome, deferred: Bool = false) {
         guard let work = inFlight.removeValue(forKey: id) else { return }   // already answered
         work.pipeline?.cancel()
         work.timeout?.cancel()
@@ -555,7 +582,7 @@ final class ClientToolBridge: ObservableObject {
         let ms = Int(Date().timeIntervalSince(work.startedAt) * 1000)
         let appState = appStateProvider()
         let permState = work.permissionKind == nil ? "n/a" : (work.permissionState ?? .unknown).permissionStateWire
-        let lateTag = work.late ? " (late, after permission)" : ""
+        let lateTag = (work.late ? " (late, after permission)" : "") + (deferred ? " (deferred)" : "")
         switch outcome {
         case .success(let text):
             ovLog("📱 tool_call \(work.wireName) \(id) → ok\(lateTag) in \(ms) ms (\(text.count) chars) appState=\(appState.rawValue) permission=\(permState)")
@@ -565,18 +592,23 @@ final class ClientToolBridge: ObservableObject {
             // tell the brain the new state without waiting for the next foreground hop.
             if code.hasPrefix("permission_required:") { refreshConnections(reason: "after \(code)") }
         }
-        record(id: id, wireName: work.wireName, outcome, ms: ms, permissionState: permState, late: work.late)
+        record(id: id, wireName: work.wireName, outcome, ms: ms, permissionState: permState, late: work.late,
+               deferred: deferred)
         guard isSessionActive else { return }
-        sendResult(id: id, outcome, permissionState: work.permissionKind == nil ? nil : (work.permissionState ?? .unknown))
+        sendResult(id: id, outcome, permissionState: work.permissionKind == nil ? nil : (work.permissionState ?? .unknown),
+                   deferred: deferred)
     }
 
     /// `aurelia.tool_result` with the AUR-837 fields. `permissionState` nil → "n/a".
-    private func sendResult(id: String, _ outcome: Outcome, permissionState: PhoneConnectionState?) {
+    /// `deferred:true` (AUR-845) only on an ok whose effect lands later — absent otherwise.
+    private func sendResult(id: String, _ outcome: Outcome, permissionState: PhoneConnectionState?,
+                            deferred: Bool = false) {
         var payload: [String: Any] = ["type": "aurelia.tool_result", "id": id]
         switch outcome {
         case .success(let text):
             payload["ok"] = true
             payload["result"] = Self.truncated(text)
+            if deferred { payload["deferred"] = true }
         case .failure(let code):
             payload["ok"] = false
             payload["error"] = code
@@ -587,7 +619,8 @@ final class ClientToolBridge: ObservableObject {
     }
 
     /// Keep the last 10 finished calls, newest first (AUR-837).
-    private func record(id: String, wireName: String, _ outcome: Outcome, ms: Int, permissionState: String, late: Bool) {
+    private func record(id: String, wireName: String, _ outcome: Outcome, ms: Int, permissionState: String, late: Bool,
+                        deferred: Bool = false) {
         let ok: Bool, error: String?
         switch outcome {
         case .success: ok = true; error = nil
@@ -595,9 +628,45 @@ final class ClientToolBridge: ObservableObject {
         }
         let rec = ClientToolCallRecord(id: id, wireName: wireName, ok: ok, error: error, ms: ms,
                                        appState: appStateProvider(), permissionState: permissionState,
-                                       late: late, at: Date())
+                                       late: late, at: Date(), deferred: deferred)
+        push(rec)
+    }
+
+    private func push(_ rec: ClientToolCallRecord) {
         recentCalls.insert(rec, at: 0)
         if recentCalls.count > Self.recentCallsKept { recentCalls.removeLast(recentCalls.count - Self.recentCallsKept) }
+    }
+
+    // MARK: Deferred effects landing (AUR-845)
+
+    /// The `aurelia.client_tool.applied` frame for one finished re-apply. Pure, so the tests pin
+    /// the exact JSON the server half is wired against.
+    static func appliedPayload(_ e: ClipboardApplied) -> [String: Any] {
+        var p: [String: Any] = [
+            "type": "aurelia.client_tool.applied",
+            "tool": e.wireName,
+            "ok": e.ok,
+            "verifiedByReadback": e.verifiedByReadback,
+            "stage": e.stage,
+            "queuedMs": e.queuedMs,
+            "appState": e.appState.rawValue,
+            "chars": e.chars
+        ]
+        if let id = e.callId { p["id"] = id }
+        return p
+    }
+
+    /// A queued effect finished (the clipboard re-apply on foreground): tell the brain, keep a
+    /// Debug row. `lastApplied` survives for the read-out even when no session is open to hear it.
+    private(set) var lastApplied: ClipboardApplied?
+    func reportApplied(_ e: ClipboardApplied) {
+        lastApplied = e
+        ovLog("📱 client_tool.applied \(e.wireName) \(e.callId ?? "-") → \(e.ok ? "ok" : "NOT applied") stage=\(e.stage) readback=\(e.verifiedByReadback ? "ok" : "mismatch") after \(e.queuedMs) ms appState=\(e.appState.rawValue)\(isSessionActive ? "" : " (no session — not sent)")")
+        push(ClientToolCallRecord(id: "\(e.callId ?? "manual")#applied", wireName: e.wireName, ok: e.ok,
+                                  error: e.ok ? nil : "not_applied", ms: e.queuedMs, appState: e.appState,
+                                  permissionState: "n/a", late: true, at: Date(), applied: true))
+        guard isSessionActive else { return }
+        send?(Self.appliedPayload(e))
     }
 
     /// ≤1024 chars; a clipped result ends in "…" so the brain knows it is a prefix.

@@ -49,7 +49,11 @@ final class GlassesManager: ObservableObject {
 
     // MARK: - Private Properties
 
-    private let wearables = Wearables.shared
+    /// AUR-845: accessed lazily, never stored. `Wearables.shared` **fatalErrors** when
+    /// `Wearables.configure()` did not succeed — and on the SIMULATOR it never does
+    /// (`WearablesError(rawValue: 0)`), so a stored property here crashed the unit-test host app
+    /// before the test bundle could even connect. Glasses are device-only anyway.
+    private var wearables: any WearablesInterface { Wearables.shared }
     private var streamSession: StreamSession?
 
     // Listener tokens (retained to keep subscriptions active)
@@ -82,8 +86,14 @@ final class GlassesManager: ObservableObject {
 
     private init() {
         print("[GlassesManager] Initializing")
+#if targetEnvironment(simulator)
+        // No DAT SDK on the simulator: touching `Wearables.shared` here is a hard crash. The
+        // manager stays inert (no glasses to register) so `xcodebuild test` has a host that boots.
+        print("[GlassesManager] simulator — Wearables listeners not armed")
+#else
         setupRegistrationListener()
         setupDevicesListener()
+#endif
     }
 
     // MARK: - Registration

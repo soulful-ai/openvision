@@ -25,7 +25,10 @@ final class ClientToolBridgeTests: XCTestCase {
                             connections: PhoneConnections = PhoneConnections(calendar: .granted, reminders: .denied, notifications: .unknown))
     -> (ClientToolBridge, Sent) {
         let sent = Sent()
-        let bridge = ClientToolBridge(tools: tools, connectionsProvider: { connections })
+        // A FRESH pending-clipboard per bridge (AUR-845): `.shared` is the app's singleton and a
+        // test must never leave its `onApplied` pointing at a dead bridge.
+        let bridge = ClientToolBridge(tools: tools, connectionsProvider: { connections },
+                                      pendingClipboard: PendingClipboard(notifier: ClipboardToolTests.FakeNotifier(), appState: { .active }))
         bridge.send = { sent.append($0) }
         return (bridge, sent)
     }
@@ -368,7 +371,8 @@ final class ClientToolBridgeTests: XCTestCase {
     // MARK: - AUR-836: pre-flight mapping + permission prompts as a state
 
     func testPreflightMappingOnTheRealRegistry() {
-        let bridge = ClientToolBridge(tools: NativeToolRegistry.shared.allTools, connectionsProvider: { PhoneConnections() })
+        let bridge = ClientToolBridge(tools: NativeToolRegistry.shared.allTools, connectionsProvider: { PhoneConnections() },
+                                      pendingClipboard: PendingClipboard(notifier: ClipboardToolTests.FakeNotifier(), appState: { .active }))
         XCTAssertEqual(bridge.permissionKind(for: "phone.calendar"), "calendar")
         XCTAssertEqual(bridge.permissionKind(for: "phone.create_reminder"), "reminders")
         XCTAssertEqual(bridge.permissionKind(for: "phone.set_timer"), "notifications")
