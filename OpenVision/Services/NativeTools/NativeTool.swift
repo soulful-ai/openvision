@@ -20,6 +20,11 @@ protocol NativeTool {
     /// realtime bridge pre-flights the authorization status BEFORE executing so a first-use
     /// system prompt is answered as `permission_required:<kind>` at once instead of an 8-s timeout.
     var permissionKind: String? { get }
+    /// AUR-793b: the realtime socket dying mid-run must NOT cancel this tool. Default false — a
+    /// call nobody can hear the answer to is normally wasted work. `phone.shazam` is the exception:
+    /// its 6-12 s listen owns the microphone and produces a match that outlives the session (the
+    /// «включи её» antecedent), so it runs to completion and the result is kept locally.
+    var survivesSessionClose: Bool { get }
     func execute(args: [String: Any]) async throws -> String
     /// AUR-845: the same call WITH the realtime bridge's call context (`aurelia.tool_call` id +
     /// wire name) and a reply that can say "accepted, finishes later". Tools whose effect may be
@@ -46,6 +51,7 @@ struct NativeToolReply: Equatable {
 
 extension NativeTool {
     var permissionKind: String? { nil }
+    var survivesSessionClose: Bool { false }
 
     func execute(args: [String: Any], call: NativeToolCall?) async throws -> NativeToolReply {
         NativeToolReply(text: try await execute(args: args))

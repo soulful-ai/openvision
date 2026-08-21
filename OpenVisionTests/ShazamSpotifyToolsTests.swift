@@ -44,6 +44,40 @@ final class ShazamSpotifyToolsTests: XCTestCase {
         }
     }
 
+    /// A tool that survives the socket close and finishes only when released.
+    final class SlowSurvivingTool: NativeTool, @unchecked Sendable {
+        let name = "slow survivor"
+        let description = "test"
+        let parametersSchema: [String: Any] = ["type": "object", "properties": [:]]
+        var survivesSessionClose: Bool { true }
+        private let gate = AsyncGate()
+        private(set) var started = false
+        func release() { gate.open() }
+        func execute(args: [String: Any]) async throws -> String {
+            started = true
+            await gate.wait()
+            return "done"
+        }
+    }
+
+    /// One-shot gate: `wait()` returns once `open()` has been called.
+    final class AsyncGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var opened = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+        func open() {
+            lock.lock(); opened = true; let w = waiters; waiters = []; lock.unlock()
+            for c in w { c.resume() }
+        }
+        func wait() async {
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                lock.lock()
+                if opened { lock.unlock(); cont.resume(); return }
+                waiters.append(cont); lock.unlock()
+            }
+        }
+    }
+
     /// A reference box for the authorize seam: the closure is escaping and non-isolated, so it
     /// cannot write to a captured `var`.
     final class Captured: @unchecked Sendable {
@@ -192,6 +226,53 @@ final class ShazamSpotifyToolsTests: XCTestCase {
             XCTAssertTrue(e.wireCode.hasPrefix("shazam_failed:202"), e.wireCode)
             XCTAssertTrue(e.wireCode.contains("mic=phone"), e.wireCode)
         } catch { XCTFail("wrong error: \(error)") }
+    }
+
+    // MARK: - AUR-793b: the listen outlives the socket
+
+    /// Field call 1 (2026-08-21 12:03Z): the socket died 6.2 s into an 8-s listen (WS 1006) and the
+    /// listen was cancelled with it — the mic window already paid for, the match thrown away. Now
+    /// `phone.shazam` runs to the end and banks its match; the other tools are still cancelled,
+    /// because nobody can hear their answer.
+    func testShazamSurvivesTheSocketCloseAndOthersDoNot() {
+        XCTAssertTrue(ShazamTool().survivesSessionClose)
+        for tool in NativeToolRegistry.shared.allTools where !(tool is ShazamTool) {
+            XCTAssertFalse(tool.survivesSessionClose, "\(tool.name) must not outlive the socket")
+        }
+    }
+
+    /// A slow tool that survives keeps its name RESERVED across the close — it still owns the mic,
+    /// so a second listen in the next session is honestly `busy`, not a fight over the hardware.
+    func testASurvivingCallKeepsItsNameBusyAcrossTheClose() async throws {
+        let slow = SlowSurvivingTool()
+        let bridge = ClientToolBridge(tools: [slow],
+                                      connectionsProvider: { PhoneConnections() },
+                                      pendingClipboard: PendingClipboard(notifier: ClipboardToolTests.FakeNotifier(),
+                                                                         appState: { .active }))
+        var sent: [[String: Any]] = []
+        bridge.send = { sent.append($0) }
+        bridge.sessionDidConnect()
+        bridge.handleToolCall(["id": "tc_1", "name": "phone.slow_survivor", "args": [:], "timeoutMs": 20000])
+        try await waitUntil { slow.started }
+
+        bridge.sessionDidDisconnect()
+        XCTAssertTrue(bridge.isBusy("phone.slow_survivor"), "the mic is still held — the name stays reserved")
+
+        // A new session: the call is still running, so a second one is refused honestly.
+        sent.removeAll()
+        bridge.sessionDidConnect()
+        bridge.handleToolCall(["id": "tc_2", "name": "phone.slow_survivor", "args": [:]])
+        try await waitUntil { sent.contains { $0["id"] as? String == "tc_2" } }
+        let refusal = sent.first { $0["id"] as? String == "tc_2" }
+        XCTAssertEqual(refusal?["error"] as? String, "busy")
+
+        // …and when it finishes, nothing is written for the dead call's id, but the name frees up.
+        slow.release()
+        try await waitUntil { !bridge.isBusy("phone.slow_survivor") }
+        XCTAssertFalse(sent.contains { $0["id"] as? String == "tc_1" },
+                       "the answer to a call whose socket died must not be posted to the next one")
+        XCTAssertTrue(bridge.recentCalls.contains { $0.id == "tc_1" && $0.ok },
+                      "it still lands in the Debug read-out")
     }
 
     // MARK: - AUR-793b: the music-capture window saves and restores the rig

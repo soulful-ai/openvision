@@ -365,6 +365,13 @@ struct ShazamTool: NativeTool {
     /// first-use prompt is a state, not an 8-second timeout.
     var permissionKind: String? { "microphone" }
 
+    /// AUR-793b — the field failure's call 1: the socket died 6.2 s into an 8-s listen (WS 1006)
+    /// and the listen was cancelled with it, with the mic already reconfigured and the window
+    /// already paid for. It now runs to the end: the match is banked in `ShazamLastMatch`, so
+    /// «включи её» works in the NEXT session even though the answer to THAT call can never be
+    /// delivered (the server clears its registry on close and resolves the call `session_closed`).
+    var survivesSessionClose: Bool { true }
+
     static let minSeconds = 6.0
     static let maxSeconds = 12.0
     static let defaultSeconds = 8.0

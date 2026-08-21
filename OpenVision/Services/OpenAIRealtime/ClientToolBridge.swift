@@ -291,6 +291,9 @@ final class ClientToolBridge: ObservableObject {
     private(set) var lastManifestSentAt: Date?
     /// True between `sessionDidConnect` and `sessionDidDisconnect` — nothing is sent otherwise.
     private(set) var isSessionActive = false
+    /// Bumped on every connect (AUR-793b): a surviving call's answer belongs to the session that
+    /// asked for it and to no other.
+    private var sessionGeneration = 0
     /// The last 10 finished calls, newest first (AUR-837 Debug read-out).
     @Published private(set) var recentCalls: [ClientToolCallRecord] = []
 
@@ -300,6 +303,11 @@ final class ClientToolBridge: ObservableObject {
         let args: [String: Any]
         let timeoutMs: Int
         let permissionKind: String?
+        /// AUR-793b: this tool keeps running when the socket dies (`phone.shazam`).
+        let survivesClose: Bool
+        /// Which session opened this call. A result may only be written to the SAME one — a
+        /// reconnect gives the server a fresh registry, where this id means nothing.
+        let generation: Int
         /// The whole pipeline (pre-flight → run, or pre-flight → prompt → late run).
         var pipeline: Task<Void, Never>?
         /// The deadline for the tool body — armed only when a body is actually running.
@@ -415,6 +423,10 @@ final class ClientToolBridge: ObservableObject {
         entries.first(where: { $0.wireName == wireName })?.tool.permissionKind
     }
 
+    /// AUR-793b: is a wire name currently held by a running call? A tool that survives a socket
+    /// close keeps its name reserved across sessions while it still owns the hardware.
+    func isBusy(_ wireName: String) -> Bool { busyNames.contains(wireName) }
+
     /// The `aurelia.client_tools` payload for a given connections snapshot.
     func manifest(connections: PhoneConnections) -> [String: Any] {
         let tools: [[String: Any]] = entries.map { e in
@@ -438,6 +450,7 @@ final class ClientToolBridge: ObservableObject {
     /// permission changes (the app comes back to the foreground after every system prompt).
     func sessionDidConnect() {
         isSessionActive = true
+        sessionGeneration += 1
         sendManifest(reason: "connected")
         if appActiveObserver == nil {
             appActiveObserver = NotificationCenter.default.addObserver(
@@ -468,12 +481,21 @@ final class ClientToolBridge: ObservableObject {
             NotificationCenter.default.removeObserver(integrationsObserver)
             self.integrationsObserver = nil
         }
-        if !inFlight.isEmpty {
-            ovLog("📱 client_tools: socket closed with \(inFlight.count) call(s) in flight — cancelled")
+        // AUR-793b: a tool that survives the close keeps running — and keeps its name reserved,
+        // because it still owns the resource (the mic). Everything else is cancelled as before:
+        // nobody can hear its answer. The survivor's result is answered by `finish`, which finds
+        // no session and keeps it locally instead of writing to a dead socket.
+        let survivors = inFlight.filter { $0.value.survivesClose }
+        let cancelled = inFlight.filter { !$0.value.survivesClose }
+        if !cancelled.isEmpty {
+            ovLog("📱 client_tools: socket closed with \(cancelled.count) call(s) in flight — cancelled")
         }
-        for (_, work) in inFlight { work.pipeline?.cancel(); work.timeout?.cancel() }
-        inFlight.removeAll()
-        busyNames.removeAll()
+        for (_, work) in cancelled { work.pipeline?.cancel(); work.timeout?.cancel() }
+        if !survivors.isEmpty {
+            ovLog("📱 client_tools: socket closed — \(survivors.count) call(s) kept running (\(survivors.values.map(\.wireName).sorted().joined(separator: ", ")))")
+        }
+        inFlight = survivors
+        busyNames = Set(survivors.values.map(\.wireName))
         promptingKinds.removeAll()
     }
 
@@ -563,7 +585,8 @@ final class ClientToolBridge: ObservableObject {
         ovLog("📱 tool_call \(name) \(id) ▶ (\(args.keys.sorted().joined(separator: ", "))) timeout \(timeoutMs) ms appState=\(appStateProvider().rawValue)\(kind.map { " permission=\($0)" } ?? "")")
 
         var work = InFlight(wireName: name, startedAt: startedAt, args: args, timeoutMs: timeoutMs,
-                            permissionKind: kind)
+                            permissionKind: kind, survivesClose: entry.tool.survivesSessionClose,
+                            generation: sessionGeneration)
         work.pipeline = Task { @MainActor [weak self] in
             guard let self else { return }
             guard let kind else {
@@ -678,7 +701,15 @@ final class ClientToolBridge: ObservableObject {
         }
         record(id: id, wireName: work.wireName, outcome, ms: ms, permissionState: permState, late: work.late,
                deferred: deferred)
-        guard isSessionActive else { return }
+        guard isSessionActive, work.generation == sessionGeneration else {
+            // AUR-793b: the socket went before the answer did. The work is NOT lost — a `shazam`
+            // match is banked in `ShazamLastMatch`, so «включи её» has its antecedent in the next
+            // session. No `client_tool.applied` frame goes out for it: the server SPEAKS every
+            // applied frame («Готово.»), which is the wrong sentence for a track name and would
+            // arrive detached from anything the wearer said.
+            ovLog("📱 tool_call \(work.wireName) \(id) finished after the socket closed — kept locally, not sent (session \(work.generation), now \(sessionGeneration))")
+            return
+        }
         sendResult(id: id, outcome, permissionState: work.permissionKind == nil ? nil : (work.permissionState ?? .unknown),
                    deferred: deferred)
     }
