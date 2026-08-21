@@ -118,7 +118,7 @@ final class ShazamSpotifyToolsTests: XCTestCase {
 
     func testMatchIsSpokenWithIdsAndRemembered() async throws {
         var fired = false
-        let listener = FakeListener(.match(match, mic: "phone"))
+        let listener = FakeListener(.match(match, .phone()))
         let tool = ShazamTool(listener: listener, earcon: { fired = true })
         let out = try await tool.execute(args: ["seconds": 9])
         XCTAssertTrue(fired, "the START earcon must fire before the listen")
@@ -126,35 +126,70 @@ final class ShazamSpotifyToolsTests: XCTestCase {
         XCTAssertTrue(out.contains("«Bohemian Rhapsody» — Queen"), out)
         XCTAssertTrue(out.contains("appleMusicID 1440806041"), out)
         XCTAssertTrue(out.contains("mic: phone"), out)
+        // AUR-793b: a MATCH is as diagnosable as a miss.
+        XCTAssertTrue(out.contains("rate=48000"), out)
+        XCTAssertTrue(out.contains("vp=off"), out)
+        XCTAssertTrue(out.contains("mode=measurement"), out)
         // «включи её» needs an antecedent.
         XCTAssertEqual(ShazamLastMatch.shared.last?.title, "Bohemian Rhapsody")
         XCTAssertEqual(ShazamLastMatch.shared.last?.searchQuery, "Queen Bohemian Rhapsody")
     }
 
-    /// A no-match is never `ok:true` — and it names the mic, because the glasses mic is narrowband
-    /// and physically cannot match music.
-    func testNoMatchFailsAndTheGlassesMicSaysWhy() async {
-        for (mic, mustContain) in [("phone", "ближе к звуку"), ("glasses", "микрофон очков")] {
-            let tool = ShazamTool(listener: FakeListener(.noMatch(mic: mic)), earcon: {})
+    /// A no-match is never `ok:true`, and AUR-793b: the code says WHY it could not have worked and
+    /// the conditions that back the claim ride the same string.
+    func testNoMatchNamesTheReasonAndCarriesTheConditions() async {
+        let cases: [(MusicCaptureConditions, String, String)] = [
+            (.phone(), "no_match", "ближе к звуку"),
+            (.glasses(), "no_match:glasses_narrowband", "микрофон очков"),
+            (.voiceProcessedPhone(), "no_match:voice_processed", "режиме разговора"),
+            (.phone(peakDbfs: -80), "no_match:silence", "ничего не услышала"),
+            (MusicCaptureConditions(mic: "phone", category: "playAndRecord", mode: "voiceChat",
+                                    voiceProcessing: false, sampleRate: 8000, peakDbfs: -30,
+                                    route: "hfp+phone-mic"), "no_match:narrowband", "узкую полосу"),
+        ]
+        for (conditions, code, mustSay) in cases {
+            let tool = ShazamTool(listener: FakeListener(.noMatch(conditions)), earcon: {})
             do {
                 _ = try await tool.execute(args: [:])
                 XCTFail("a no-match must not succeed")
             } catch let e as NativeToolError {
-                XCTAssertEqual(e.wireCode, "no_match")
-                XCTAssertTrue((e.errorDescription ?? "").contains(mustContain), e.errorDescription ?? "")
+                XCTAssertTrue(e.wireCode.hasPrefix(code), "\(e.wireCode) must start with \(code)")
+                // The whole read-out rides the wire: no device console needed to explain a miss.
+                XCTAssertTrue(e.wireCode.contains("mic=\(conditions.mic)"), e.wireCode)
+                XCTAssertTrue(e.wireCode.contains("vp="), e.wireCode)
+                XCTAssertTrue(e.wireCode.contains("rate="), e.wireCode)
+                XCTAssertTrue(e.wireCode.contains("lvl="), e.wireCode)
+                XCTAssertTrue(e.wireCode.contains("mode=\(conditions.mode)"), e.wireCode)
+                XCTAssertLessThanOrEqual(e.wireCode.count, 118, "the server budget for `error` is 120 chars")
+                XCTAssertTrue((e.errorDescription ?? "").contains(mustSay), e.errorDescription ?? "")
             } catch { XCTFail("wrong error: \(error)") }
         }
     }
 
+    /// Precedence: silence beats every other explanation — a mic that heard nothing was never given
+    /// a chance, whatever else was wrong with it.
+    func testSilenceWinsOverTheOtherReasons() {
+        var c = MusicCaptureConditions.glasses()
+        c.voiceProcessing = true
+        c.peakDbfs = -90
+        XCTAssertEqual(c.noMatchCode, "no_match:silence")
+        c.peakDbfs = -20
+        XCTAssertEqual(c.noMatchCode, "no_match:glasses_narrowband")
+        XCTAssertNil(MusicCaptureConditions.phone().noMatchReason,
+                     "a clean music-capable capture has no excuse to offer")
+    }
+
     func testShazamKitErrorsKeepTheirCode() async {
         let tool = ShazamTool(listener: FakeListener(.failed(code: "shazam_failed:202",
-                                                             spoken: "Не смогла спросить Shazam (202).")),
+                                                             spoken: "Не смогла спросить Shazam (202).",
+                                                             conditions: .phone())),
                               earcon: {})
         do {
             _ = try await tool.execute(args: [:])
             XCTFail("must throw")
         } catch let e as NativeToolError {
-            XCTAssertEqual(e.wireCode, "shazam_failed:202")
+            XCTAssertTrue(e.wireCode.hasPrefix("shazam_failed:202"), e.wireCode)
+            XCTAssertTrue(e.wireCode.contains("mic=phone"), e.wireCode)
         } catch { XCTFail("wrong error: \(error)") }
     }
 

@@ -425,6 +425,75 @@ final class AudioSessionManager {
         audioSession.outputLatency + audioSession.ioBufferDuration
     }
 
+    // MARK: - AUR-793b: the music-capture window (`phone.shazam`)
+
+    /// What `beginMusicWindow()` took away, so `endMusicWindow(_:)` can put it back exactly.
+    struct MusicWindow {
+        let category: AVAudioSession.Category
+        let mode: AVAudioSession.Mode
+        let options: AVAudioSession.CategoryOptions
+        let preferredInput: AVAudioSessionPortDescription?
+        let sampleRate: Double
+        /// The live call's shared engine was running and got paused for the window.
+        let enginePaused: Bool
+        /// Voice processing was on before the window (it goes back on at the end).
+        let voiceProcessingWas: Bool
+    }
+
+    /// True while a `phone.shazam` listen owns the mic. Route / configuration churn caused by the
+    /// window ITSELF is not a mic change and must not be reported to the live call — otherwise
+    /// every listen restarts the STT stream and re-hydrates the memory budget twice (visible in the
+    /// 2026-08-21 12:03Z pod log, once per listen, in each direction).
+    private(set) var musicWindowActive = false
+
+    /// The mic label the tool reports: which port actually carries the audio right now.
+    var micLabel: String {
+        switch audioSession.currentRoute.inputs.first?.portType {
+        case .some(.builtInMic): return "phone"
+        case .some(.bluetoothHFP), .some(.bluetoothLE): return "glasses"
+        case .some(.headsetMic), .some(.headphones): return "headset"
+        case .some(let other): return other.rawValue
+        case .none: return "none"
+        }
+    }
+
+    /// The capture conditions read-out for a `phone.shazam` result (AUR-793b). `sampleRate` and
+    /// `voiceProcessing` come from the LISTEN's own engine — the session's preferred values are a
+    /// request, the tap's format is the truth.
+    func musicCaptureConditions(sampleRate: Double, voiceProcessing: Bool, callPaused: Bool) -> MusicCaptureConditions {
+        MusicCaptureConditions(mic: micLabel,
+                               category: audioSession.category.rawValue.replacingOccurrences(of: "AVAudioSessionCategory", with: ""),
+                               mode: audioSession.mode.rawValue.replacingOccurrences(of: "AVAudioSessionMode", with: ""),
+                               voiceProcessing: voiceProcessing,
+                               sampleRate: sampleRate > 0 ? sampleRate : audioSession.sampleRate,
+                               peakDbfs: -120,
+                               route: routeInfo.tag,
+                               callPaused: callPaused)
+    }
+
+    /// Open a listen window. This first cut only SNAPSHOTS the rig and reports it — the
+    /// reconfiguration lands in the next commit; the observability has to come first so the next
+    /// field attempt says what it ran on either way.
+    @discardableResult
+    func beginMusicWindow() -> MusicWindow {
+        musicWindowActive = true
+        let window = MusicWindow(category: audioSession.category,
+                                 mode: audioSession.mode,
+                                 options: audioSession.categoryOptions,
+                                 preferredInput: audioSession.preferredInput,
+                                 sampleRate: audioSession.sampleRate,
+                                 enginePaused: false,
+                                 voiceProcessingWas: voiceProcessingEnabled)
+        ovLog("[AudioSession] 🎵 music window open — \(routeInfo.description), mode \(audioSession.mode.rawValue), vp \(voiceProcessingEnabled ? "on" : "off")")
+        return window
+    }
+
+    /// Close the listen window and put the rig back.
+    func endMusicWindow(_ window: MusicWindow) {
+        musicWindowActive = false
+        ovLog("[AudioSession] 🎵 music window closed — \(routeInfo.description)")
+    }
+
     // MARK: - Route observers
 
     private func installRouteObservers() {
@@ -453,6 +522,11 @@ final class AudioSessionManager {
     }
 
     private func handleRouteChange(_ reason: AVAudioSession.RouteChangeReason) {
+        // AUR-793b: the churn a music window causes is the window's own doing, not a mic change.
+        guard !musicWindowActive else {
+            ovLog("[AudioSession] Route change (\(reason)) inside the music window — not reported")
+            return
+        }
         let info = RouteInfo(inputPort: routeInfo.inputPort, inputType: routeInfo.inputType,
                              outputPort: routeInfo.outputPort, outputType: routeInfo.outputType,
                              sampleRate: routeInfo.sampleRate, reason: String(describing: reason))
@@ -464,6 +538,10 @@ final class AudioSessionManager {
     }
 
     private func handleEngineConfigurationChange() {
+        guard !musicWindowActive else {
+            ovLog("[AudioSession] Engine configuration change inside the music window — deferred to its close")
+            return
+        }
         ovLog("[AudioSession] AVAudioEngine configuration change — rebuilding taps")
         onEngineConfigurationChange?()
     }

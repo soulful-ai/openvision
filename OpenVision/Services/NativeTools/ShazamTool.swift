@@ -10,6 +10,23 @@
 // and SAYS SO in the result (`mic: glasses`), because a no-match on a narrowband mic is a fact the
 // wearer should be able to act on ("hold the phone closer"), not a mystery.
 //
+// AUR-793b — the field failure (2026-08-21 12:03Z, rt_2/rt_3) and what it proved. The pod log
+// showed `phone.shazam` flipping the route to `hfp+phone-mic` with `aec:true` for exactly the
+// length of each listen and back afterwards. So the mic switch WORKED — and `aec:true` is
+// `AudioSessionManager.clientAECActive`, which is only true when voice-processing IO (AEC/AGC/NS)
+// is live on the built-in mic. The listen was therefore running INSIDE the call's own rig:
+// `.playAndRecord` + `.voiceChat`, VPIO on the input node, HFP still on the output. All three are
+// speech isolators — AGC rides the level, the noise suppressor treats sustained non-speech as
+// noise, and the SCO link pins the input band. That is a fingerprint of a speech stream, not of the
+// record. `preferPhoneMic()` moved the PORT and nothing else.
+//
+// So two things changed here: the listen now MEASURES and REPORTS its own conditions (mic, category
+// + mode, voice processing, real sample rate, peak level, route) on the result AND on the failure
+// code, and it takes a music-capable capture window for its duration (see
+// `AudioSessionManager.beginMusicWindow`). `SHManagedSession` is gone with it: it records on
+// whatever the app's session happens to be and reports neither level nor format, so it could
+// neither be fixed nor explained. `SHSession.matchStreamingBuffer` on an engine we own can be both.
+//
 // No account, no login, no network keys of our own: ShazamKit matches against Apple's catalog with
 // the app's own entitlement. One human step is required ONCE, and it is not in this repo:
 // developer.apple.com → Identifiers → app.soulless.openvision → App Services → **ShazamKit** → Save.
@@ -41,13 +58,97 @@ struct ShazamMatch: Equatable, Codable {
     }
 }
 
-/// What one listen produced.
+// MARK: - The conditions one listen ran under (AUR-793b observability)
+
+/// What the microphone ACTUALLY was while Shazam listened. Every field rides the tool result and,
+/// on a failure, the wire code — so the brain log answers "why did it not match" without anyone
+/// reading a device console. Before this the only thing that crossed the wire was a bare
+/// `no_match`, and the one fact that explained it (voice processing) lived in `ovLog`.
+struct MusicCaptureConditions: Equatable {
+    /// "phone" | "glasses" | "headset" | "none" — the port that actually carried the audio.
+    var mic = "unknown"
+    /// The audio-session category in force during the listen ("playAndRecord").
+    var category = ""
+    /// The MODE in force ("measurement" = music-capable, "voiceChat" = a speech isolator).
+    var mode = ""
+    /// Voice-processing IO (Apple's AEC/AGC/NS) live on the capture. The thing that ate the music.
+    var voiceProcessing = false
+    /// The tap's REAL sample rate in Hz — not the preferred one, the one we got.
+    var sampleRate: Double = 0
+    /// Peak level measured across the whole listen, dBFS. -120 = digital silence.
+    var peakDbfs: Double = -120
+    /// The full route tag, e.g. "hfp+phone-mic".
+    var route = ""
+    /// True when the live call's own capture was paused so the listen could have a clean mic.
+    var callPaused = false
+
+    /// Below this peak nothing audible reached the mic — a no-match here is not Shazam's verdict.
+    static let silenceFloorDbfs = -55.0
+    /// Under this the capture cannot carry a fingerprint (HFP narrowband is 8 kHz, wideband 16).
+    static let narrowbandRate = 22_050.0
+
+    /// One compact line for the wire and the log (≤96 chars).
+    var wire: String {
+        "mic=\(mic) rate=\(Int(sampleRate)) vp=\(voiceProcessing ? "on" : "off") mode=\(mode)"
+        + " lvl=\(Int(peakDbfs.rounded()))dBFS route=\(route)\(callPaused ? " call=paused" : "")"
+    }
+
+    /// Why a no-match could not have worked — most decisive first. `nil` means the capture WAS
+    /// music-capable and Shazam genuinely did not recognise what it heard.
+    var noMatchReason: String? {
+        if peakDbfs < Self.silenceFloorDbfs { return "silence" }
+        if mic == "glasses" { return "glasses_narrowband" }
+        if sampleRate > 0, sampleRate < Self.narrowbandRate { return "narrowband" }
+        if voiceProcessing { return "voice_processed" }
+        return nil
+    }
+
+    /// `no_match` or `no_match:<reason>` — the code the brain sees.
+    var noMatchCode: String { noMatchReason.map { "no_match:\($0)" } ?? "no_match" }
+
+    /// The sentence for the wearer. The reason decides what she can actually DO about it — the
+    /// point of the taxonomy is that "hold the phone closer" is wrong advice four times out of five.
+    var noMatchSpoken: String {
+        switch noMatchReason {
+        case "silence":
+            return "Я вообще ничего не услышала — тихо. Поднеси телефон к колонке и попробуем ещё раз."
+        case "glasses_narrowband":
+            return "Не узнала трек — слушала через микрофон очков (узкая полоса, музыка по нему не ловится). Достань телефон и попробуем ещё раз."
+        case "narrowband":
+            return "Не узнала трек — микрофон отдал узкую полосу. Отключи очки от звонка и попробуем ещё раз."
+        case "voice_processed":
+            return "Не узнала трек — микрофон был в режиме разговора и вырезал музыку. Попробуем ещё раз."
+        default:
+            return "Не узнала трек. Поднеси телефон ближе к звуку и попробуем ещё раз."
+        }
+    }
+
+    /// Test seam: a clean, music-capable phone capture.
+    static func phone(rate: Double = 48_000, peakDbfs: Double = -25) -> MusicCaptureConditions {
+        MusicCaptureConditions(mic: "phone", category: "playAndRecord", mode: "measurement",
+                               voiceProcessing: false, sampleRate: rate, peakDbfs: peakDbfs,
+                               route: "speaker+phone-mic", callPaused: true)
+    }
+    /// Test seam: the rig the field failure actually ran on.
+    static func voiceProcessedPhone() -> MusicCaptureConditions {
+        MusicCaptureConditions(mic: "phone", category: "playAndRecord", mode: "voiceChat",
+                               voiceProcessing: true, sampleRate: 24_000, peakDbfs: -30,
+                               route: "hfp+phone-mic")
+    }
+    /// Test seam: the glasses' HFP mic.
+    static func glasses() -> MusicCaptureConditions {
+        MusicCaptureConditions(mic: "glasses", category: "playAndRecord", mode: "voiceChat",
+                               voiceProcessing: false, sampleRate: 16_000, peakDbfs: -30,
+                               route: "hfp+bt-mic")
+    }
+}
+
+/// What one listen produced. Every case carries the conditions it ran under (AUR-793b).
 enum ShazamOutcome: Equatable {
-    /// `mic` = "phone" | "glasses" — which input actually carried the audio.
-    case match(ShazamMatch, mic: String)
-    case noMatch(mic: String)
+    case match(ShazamMatch, MusicCaptureConditions)
+    case noMatch(MusicCaptureConditions)
     /// A ShazamKit / audio failure: the short wire code and the sentence for the wearer.
-    case failed(code: String, spoken: String)
+    case failed(code: String, spoken: String, conditions: MusicCaptureConditions)
 }
 
 /// The last track she recognised, so «включи её» / «лайкни» have an antecedent without the model
@@ -66,71 +167,177 @@ protocol ShazamListening: Sendable {
     func listen(seconds: Double) async -> ShazamOutcome
 }
 
-/// `SHManagedSession` + the phone-mic preference. The session owns its own audio capture; we only
-/// steer which input it captures from, and we always put the preference back.
+/// One listen on a capture we own: a dedicated `AVAudioEngine` with voice processing explicitly
+/// OFF, feeding `SHSession.matchStreamingBuffer`.
+///
+/// Why not `SHManagedSession` any more: it records on whatever the app's audio session happens to
+/// be at that moment and hands back neither the level nor the format. During a live call that
+/// session is `.playAndRecord` + `.voiceChat` with voice-processing IO on the input node — proven
+/// in the field on 2026-08-21 — and a managed session gives no seam to change it or to say so.
 struct SystemShazamListener: ShazamListening {
-
     func listen(seconds: Double) async -> ShazamOutcome {
-        let (mic, restore) = await MainActor.run { Self.preferPhoneMic() }
-        defer { Task { @MainActor in restore() } }
+        await MusicListen.run(seconds: seconds)
+    }
+}
 
-        let session = SHManagedSession()
-        await session.prepare()
+/// Peak meter over the listen. Fed from the audio thread, read once at the end.
+final class MusicLevelMeter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var peak: Float = 0
 
-        // Bounded listen: whichever finishes first wins, then the session is cancelled either way.
-        let result: SHSession.Result? = await withTaskGroup(of: SHSession.Result?.self) { group in
-            group.addTask { await session.result() }
+    func feed(_ buffer: AVAudioPCMBuffer) {
+        guard let channels = buffer.floatChannelData, buffer.frameLength > 0 else { return }
+        let n = Int(buffer.frameLength)
+        var p: Float = 0
+        for i in 0..<n { p = max(p, abs(channels[0][i])) }
+        lock.lock(); peak = max(peak, p); lock.unlock()
+    }
+
+    /// Peak in dBFS; -120 for digital silence.
+    var peakDbfs: Double {
+        lock.lock(); let p = peak; lock.unlock()
+        guard p > 0 else { return -120 }
+        return max(-120, 20 * log10(Double(p)))
+    }
+}
+
+/// `SHSessionDelegate` → one awaited outcome. A plain `didNotFindMatchFor` fires for EVERY
+/// streaming batch and is not an answer — only a match, a real error, or the clock ends the listen.
+final class ShazamMatchCollector: NSObject, SHSessionDelegate, @unchecked Sendable {
+    enum Outcome { case match(SHMatch); case error(NSError) }
+
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Outcome?, Never>?
+    private var done = false
+    private var settled: Outcome?
+
+    /// Wait up to `seconds` for a match. `nil` = the clock won (no match).
+    func result(within seconds: Double) async -> Outcome? {
+        await withTaskGroup(of: Outcome?.self) { group in
+            group.addTask { await self.next() }
             group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+                // Resolve the waiter BEFORE returning: a continuation left suspended would hang
+                // the group at scope exit, cancellation does not resume it.
+                self.finish(nil)
                 return nil
             }
             let first = await group.next() ?? nil
             group.cancelAll()
-            session.cancel()
             return first
         }
+    }
 
-        guard let result else { return .noMatch(mic: mic) }   // the clock won: nothing recognised
-        switch result {
-        case .match(let match):
+    private func next() async -> Outcome? {
+        await withCheckedContinuation { cont in
+            lock.lock()
+            if done { let s = settled; lock.unlock(); cont.resume(returning: s); return }
+            continuation = cont
+            lock.unlock()
+        }
+    }
+
+    private func finish(_ outcome: Outcome?) {
+        lock.lock()
+        guard !done else { lock.unlock(); return }
+        done = true
+        settled = outcome
+        let cont = continuation
+        continuation = nil
+        lock.unlock()
+        cont?.resume(returning: outcome)
+    }
+
+    func session(_ session: SHSession, didFind match: SHMatch) { finish(.match(match)) }
+
+    func session(_ session: SHSession, didNotFindMatchFor signature: SHSignature, error: Error?) {
+        // No error = "not this batch" — keep listening. An error IS the answer (202 = the App
+        // Service is missing on the App ID, or a Shazam-side hiccup).
+        guard let error else { return }
+        finish(.error(error as NSError))
+    }
+}
+
+/// The listen itself: open a music-capable window, capture on our own non-voice-processed engine,
+/// hand every buffer to ShazamKit, and report BOTH the verdict and the conditions it ran under.
+enum MusicListen {
+
+    /// The live call's playout tail gets this long to drain before the rig is paused, so a short
+    /// «Уже слушаю» is not chopped mid-word by the window opening.
+    static let playoutGraceSeconds = 0.35
+
+    @MainActor
+    static func run(seconds: Double) async -> ShazamOutcome {
+        let manager = AudioSessionManager.shared
+        if manager.sharedEngine?.isRunning == true {
+            try? await Task.sleep(nanoseconds: UInt64((manager.playoutTailSeconds + playoutGraceSeconds) * 1_000_000_000))
+        }
+        let window = manager.beginMusicWindow()
+        defer { manager.endMusicWindow(window) }
+
+        let engine = AVAudioEngine()
+        let input = engine.inputNode
+        // The engine has not started, so this is legal — AVAudioIONode.h: "Voice processing can
+        // only be enabled or disabled when the engine is in a stopped state."
+        do { try input.setVoiceProcessingEnabled(false) }
+        catch { ovLog("🎧 shazam: could not disable voice processing on the listen engine: \(error)") }
+
+        let format = input.outputFormat(forBus: 0)
+        var conditions = manager.musicCaptureConditions(sampleRate: format.sampleRate,
+                                                        voiceProcessing: input.isVoiceProcessingEnabled,
+                                                        callPaused: window.enginePaused)
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            ovLog("🎧 shazam ✘ mic_unavailable [\(conditions.wire)]")
+            return .failed(code: "mic_unavailable",
+                           spoken: "Микрофон сейчас занят. Попробуем ещё раз через секунду.",
+                           conditions: conditions)
+        }
+
+        let meter = MusicLevelMeter()
+        let collector = ShazamMatchCollector()
+        let session = SHSession()
+        session.delegate = collector
+        input.installTap(onBus: 0, bufferSize: 8192, format: format) { buffer, when in
+            meter.feed(buffer)
+            session.matchStreamingBuffer(buffer, at: when)
+        }
+        do {
+            engine.prepare()
+            try engine.start()
+        } catch {
+            input.removeTap(onBus: 0)
+            ovLog("🎧 shazam ✘ mic_unavailable (engine start): \(error) [\(conditions.wire)]")
+            return .failed(code: "mic_unavailable",
+                           spoken: "Микрофон сейчас занят. Попробуем ещё раз через секунду.",
+                           conditions: conditions)
+        }
+        ovLog("🎧 shazam ▶ capture open — \(conditions.wire)")
+
+        let outcome = await collector.result(within: seconds)
+        input.removeTap(onBus: 0)
+        engine.stop()
+        conditions.peakDbfs = meter.peakDbfs
+
+        switch outcome {
+        case .none:
+            return .noMatch(conditions)
+        case .some(.error(let ns)):
+            let code = ns.domain == SHErrorDomain ? "shazam_failed:\(ns.code)" : "shazam_failed"
+            // 202 = MatchAttemptFailed — what a missing ShazamKit App Service on the App ID looks
+            // like from here, and also what a real Shazam server hiccup looks like.
+            return .failed(code: code,
+                           spoken: "Не смогла спросить Shazam (\(ns.code)). Попробуй ещё раз.",
+                           conditions: conditions)
+        case .some(.match(let match)):
             guard let item = match.mediaItems.first, let title = item.title else {
-                return .noMatch(mic: mic)
+                return .noMatch(conditions)
             }
             return .match(ShazamMatch(title: title,
                                       artist: item.artist,
                                       appleMusicID: item.appleMusicID,
                                       artworkURL: item.artworkURL?.absoluteString,
                                       isrc: item.isrc),
-                          mic: mic)
-        case .noMatch:
-            return .noMatch(mic: mic)
-        case .error(let error, _):
-            let ns = error as NSError
-            let code = ns.domain == SHErrorDomain ? "shazam_failed:\(ns.code)" : "shazam_failed"
-            // 202 = MatchAttemptFailed — what a missing ShazamKit App Service on the App ID looks
-            // like from here, and also what a real Shazam server hiccup looks like. Same sentence:
-            // try again, and if it keeps happening the capability is the thing to check.
-            return .failed(code: code, spoken: "Не смогла спросить Shazam (\(ns.code)). Попробуй ещё раз.")
-        }
-    }
-
-    /// Point the audio session at the built-in mic, and hand back the label + the undo.
-    @MainActor
-    static func preferPhoneMic() -> (String, () -> Void) {
-        let session = AVAudioSession.sharedInstance()
-        let previous = session.preferredInput
-        let restore: () -> Void = { try? session.setPreferredInput(previous) }
-        guard let builtIn = session.availableInputs?.first(where: { $0.portType == .builtInMic }) else {
-            ovLog("🎧 shazam: no built-in mic among the available inputs — listening on the current route")
-            return ("glasses", restore)
-        }
-        do {
-            try session.setPreferredInput(builtIn)
-            ovLog("🎧 shazam: preferred input → built-in mic (was \(previous?.portName ?? "default"))")
-            return ("phone", restore)
-        } catch {
-            ovLog("🎧 shazam: could not switch to the built-in mic (\(error.localizedDescription)) — listening on the current route")
-            return ("glasses", restore)
+                          conditions)
         }
     }
 }
@@ -182,14 +389,24 @@ struct ShazamTool: NativeTool {
         return min(maxSeconds, max(minSeconds, Double(raw)))
     }
 
-    static func spoken(_ match: ShazamMatch, mic: String) -> String {
+    /// The result text. AUR-793b: the capture conditions ride it, so a MATCH is as diagnosable as
+    /// a miss (a match at -52 dBFS on a voice-processed mic is luck, and the log should say so).
+    static func spoken(_ match: ShazamMatch, conditions: MusicCaptureConditions) -> String {
         var line = "«\(match.title)»"
         if let artist = match.artist { line += " — \(artist)" }
         var extras: [String] = []
         if let id = match.appleMusicID { extras.append("appleMusicID \(id)") }
         if let art = match.artworkURL { extras.append("artwork \(art)") }
-        extras.append("mic: \(mic)")
+        extras.append("mic: \(conditions.mic)")
+        extras.append(conditions.wire)
         return "Shazam: \(line) (\(extras.joined(separator: ", ")))"
+    }
+
+    /// The wire code for a failure: the short code FIRST (so any `startsWith` on the server still
+    /// works), then the one-line conditions. The server wraps `error` into the model's turn with a
+    /// 120-char budget (`toolResultNote`), which is exactly what this fits into.
+    static func wireCode(_ code: String, _ conditions: MusicCaptureConditions) -> String {
+        String("\(code) \(conditions.wire)".prefix(118))
     }
 
     func execute(args: [String: Any]) async throws -> String {
@@ -197,22 +414,22 @@ struct ShazamTool: NativeTool {
         await MainActor.run { earcon() }            // START earcon: she is listening NOW
         ovLog("🎧 shazam ▶ listening \(Int(seconds)) s")
         switch await listener.listen(seconds: seconds) {
-        case .match(let match, let mic):
+        case .match(let match, let conditions):
             await MainActor.run { remember(match) }
-            ovLog("🎧 shazam ✔ \(match.title) [mic \(mic)]")
-            return Self.spoken(match, mic: mic)
-        case .noMatch(let mic):
-            ovLog("🎧 shazam ✘ no match [mic \(mic)]")
+            ovLog("🎧 shazam ✔ \(match.title) [\(conditions.wire)]")
+            return Self.spoken(match, conditions: conditions)
+        case .noMatch(let conditions):
             // Never `ok:true` for "nothing happened" (the AUR-833 rule): a no-match is a failure
-            // the brain must be able to tell the wearer about — including WHICH mic heard nothing,
-            // since the glasses mic is narrowband and simply cannot match music.
-            let hint = mic == "phone"
-                ? "Не узнала трек. Поднеси телефон ближе к звуку и попробуем ещё раз."
-                : "Не узнала трек — слушала через микрофон очков (узкая полоса, музыка по нему не ловится). Достань телефон и попробуем ещё раз."
-            throw NativeToolError.failed(code: "no_match", spoken: hint)
-        case .failed(let code, let spoken):
-            ovLog("🎧 shazam ✘ \(code)")
-            throw NativeToolError.failed(code: code, spoken: spoken)
+            // the brain must be able to tell the wearer about. AUR-793b: it also says WHY it could
+            // not have worked — silence, a narrowband mic, or a voice-processed capture — and the
+            // conditions that back the claim ride the same code.
+            let code = conditions.noMatchCode
+            ovLog("🎧 shazam ✘ \(code) [\(conditions.wire)]")
+            throw NativeToolError.failed(code: Self.wireCode(code, conditions),
+                                         spoken: conditions.noMatchSpoken)
+        case .failed(let code, let spoken, let conditions):
+            ovLog("🎧 shazam ✘ \(code) [\(conditions.wire)]")
+            throw NativeToolError.failed(code: Self.wireCode(code, conditions), spoken: spoken)
         }
     }
 }
