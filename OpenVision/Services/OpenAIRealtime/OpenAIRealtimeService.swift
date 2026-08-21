@@ -35,6 +35,7 @@
 import Foundation
 import AVFoundation
 import ImageIO
+import UIKit
 
 /// Backend-agnostic surface for the live audio + video mode. GeminiLiveService and
 /// OpenAIRealtimeService both conform, so the view layer can pick one at runtime.
@@ -211,9 +212,34 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
                 self.sendClientMetadata()
             }
         }
+        // AUR-845, same AUR-803b rail: the phone left / came back to the foreground mid-call →
+        // `metadata.appState` follows. The wearer pockets the phone during a glasses call and iOS
+        // stops honouring pasteboard writes; the brain has to know that without inferring it from
+        // the last tool result. Deduped — only a CHANGED state is re-declared. Idle unless a
+        // session is open.
+        for name in [UIApplication.didBecomeActiveNotification,
+                     UIApplication.willResignActiveNotification,
+                     UIApplication.didEnterBackgroundNotification,
+                     UIApplication.willEnterForegroundNotification] {
+            appStateObservers.append(NotificationCenter.default.addObserver(
+                forName: name, object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self, self.connectionState.isUsable else { return }
+                    let now = AppForegroundState.current()
+                    guard now != self.lastSentAppState else { return }
+                    ovLog("[OpenAIRealtime] app state \(self.lastSentAppState?.rawValue ?? "?") → \(now.rawValue); re-sending metadata")
+                    self.sendClientMetadata()
+                }
+            })
+        }
     }
 
     private var tzObserver: NSObjectProtocol?
+    /// AUR-845: the four foreground-lifecycle observers behind `metadata.appState`.
+    private var appStateObservers: [NSObjectProtocol] = []
+    /// The last `appState` that actually crossed the wire — the dedup key for the re-declares.
+    private var lastSentAppState: AppForegroundState?
 
     // MARK: - Connection
 
@@ -447,24 +473,32 @@ final class OpenAIRealtimeService: ObservableObject, LiveVideoService {
     /// UTC, DST included) are the phone's CURRENT zone; the brain sets the session clock from
     /// them (precedence metadata → `?tz=` → profile → Europe/Amsterdam) and echoes
     /// `session.updated.metadata.tz/tz_source`.
+    /// AUR-845: `appState` ("active" | "inactive" | "background") is the phone's foreground state
+    /// at send time, re-declared on every change while the session is open — the brain needs it to
+    /// read a `deferred` clipboard result ("he is not in the app, the paste has NOT landed yet")
+    /// without guessing from the last tool result.
     nonisolated static func clientMetadata(route: String, aec: Bool,
-                                           timeZone: TimeZone = .current) -> [String: Any] {
+                                           timeZone: TimeZone = .current,
+                                           appState: AppForegroundState) -> [String: Any] {
         [
             "client": Constants.RealtimeAudio.clientTag,
             "proto": Constants.RealtimeAudio.protocolTag,
             "route": route,
             "aec": aec,
             "tz": timeZone.identifier,
-            "utcOffsetMin": timeZone.secondsFromGMT() / 60
+            "utcOffsetMin": timeZone.secondsFromGMT() / 60,
+            "appState": appState.rawValue
         ]
     }
 
-    /// The live metadata for THIS send, logged once per send (`🕒 tz Europe/Amsterdam (+120)`).
+    /// The live metadata for THIS send, logged once per send (`🕒 tz Europe/Amsterdam (+120) app active`).
     private func currentClientMetadata() -> [String: Any] {
         let tz = TimeZone.current
         let offset = tz.secondsFromGMT() / 60
-        ovLog("[OpenAIRealtime] 🕒 tz \(tz.identifier) (\(offset >= 0 ? "+" : "")\(offset))")
-        return Self.clientMetadata(route: routeTag, aec: aecActive, timeZone: tz)
+        let state = AppForegroundState.current()
+        lastSentAppState = state
+        ovLog("[OpenAIRealtime] 🕒 tz \(tz.identifier) (\(offset >= 0 ? "+" : "")\(offset)) app \(state.rawValue)")
+        return Self.clientMetadata(route: routeTag, aec: aecActive, timeZone: tz, appState: state)
     }
 
     /// Re-declare the client hints mid-session (route change flipped AEC, mic moved to the

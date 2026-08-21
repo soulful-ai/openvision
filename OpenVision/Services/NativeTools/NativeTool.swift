@@ -21,10 +21,35 @@ protocol NativeTool {
     /// system prompt is answered as `permission_required:<kind>` at once instead of an 8-s timeout.
     var permissionKind: String? { get }
     func execute(args: [String: Any]) async throws -> String
+    /// AUR-845: the same call WITH the realtime bridge's call context (`aurelia.tool_call` id +
+    /// wire name) and a reply that can say "accepted, finishes later". Tools whose effect may be
+    /// deferred by iOS (the clipboard from the background) implement this one so the later
+    /// `aurelia.client_tool.applied` event can name the call it completes. Default: the plain
+    /// `execute(args:)`, never deferred.
+    func execute(args: [String: Any], call: NativeToolCall?) async throws -> NativeToolReply
+}
+
+/// The realtime bridge's identity for one `aurelia.tool_call` (AUR-845). Nil on the push-to-ask
+/// path, where there is no wire id to attribute a later event to.
+struct NativeToolCall: Equatable {
+    let id: String
+    let wireName: String
+}
+
+/// What a tool hands back to the bridge (AUR-845): the spoken text, plus `deferred` = the tool
+/// accepted the call but the effect lands LATER (and an `aurelia.client_tool.applied` event will
+/// say when). The wire carries it as `aurelia.tool_result.deferred:true`.
+struct NativeToolReply: Equatable {
+    let text: String
+    var deferred: Bool = false
 }
 
 extension NativeTool {
     var permissionKind: String? { nil }
+
+    func execute(args: [String: Any], call: NativeToolCall?) async throws -> NativeToolReply {
+        NativeToolReply(text: try await execute(args: args))
+    }
 
     /// OpenAI Chat Completions tool spec (also close enough for other function-calling backends).
     var openAISpec: [String: Any] {

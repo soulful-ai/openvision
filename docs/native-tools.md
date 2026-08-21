@@ -14,7 +14,7 @@ the model only decides *when* to call a tool and *with what arguments*; the tool
 | Reminder | `create_reminder` | EventKit (Reminders) | Optional due time |
 | Calendar | `calendar` | EventKit (Events) | `today` / `upcoming` / `add` |
 | Note | `note` | UserDefaults + CoreLocation | `save` / `search` / `list` / `delete`, auto-tagged with place + time |
-| Clipboard | `copy_to_clipboard` | UIPasteboard | — |
+| Clipboard | `copy_to_clipboard` | UIPasteboard | Foreground-only write; queued + re-applied when backgrounded — see [Deferred effects](#deferred-effects--the-clipboard-and-the-wire-the-server-half-is-coded-against-aur-845) |
 
 > There is intentionally **no alarm tool**. iOS gives third-party apps no API to create alarms in
 > the Clock app, and a plain notification is a poor substitute for a wake-up alarm. Use a reminder
@@ -83,6 +83,100 @@ silent mode) for `timer-` / `pomodoro-` notification IDs.
 `Info.plist` declares `NSRemindersUsageDescription` / `NSRemindersFullAccessUsageDescription`,
 `NSCalendarsUsageDescription` / `NSCalendarsFullAccessUsageDescription`, and
 `NSLocationWhenInUseUsageDescription` (note geotagging). Access is requested on first use.
+
+## Deferred effects — the clipboard, and the wire the server half is coded against (AUR-845)
+
+### What iOS actually allows
+
+The general pasteboard is **foreground-only** and has been since iOS 9. A `UIPasteboard.general`
+write from a process that is not frontmost is silently not propagated, and a read returns `nil` —
+and it starts *before* the app is really in the background: "the pasteboard is even blocked before
+the App is actually in the background. Even in the `applicationWillResignActive:` delegate of
+`UIApplication` the pasteboard already returns nil"
+([Apple Developer Forums thread 13760](https://developer.apple.com/forums/thread/13760)).
+
+Things that do **not** lift the rule, all of them tried in `ClipboardTool.copy`:
+
+| Attempt | What it actually does |
+|---|---|
+| `setItems(_:options:)` with `.localOnly` / `.expirationDate` | shapes Universal Clipboard + item lifetime, not the foreground rule |
+| `beginBackgroundTask` around the write | keeps the **process** alive; it does not make the app frontmost |
+| an entitlement | there is none |
+
+So the tool **tries the write anyway** while backgrounded (background task + explicit options) and
+lets the **read-back** decide — the doc says iOS drops it, the field gets to disagree — and when
+the read-back fails it **queues** the text and re-applies it on `willEnterForeground` (first
+chance) and `didBecomeActive` (the write iOS honours), verifying by read-back each time. A local
+notification ("Скопирую, как только откроешь приложение") is the one-tap way to bring the app to
+the front from whatever app the wearer is pasting into.
+
+**Order rule, everywhere:** *write, then read back.* Reading a pasteboard whose items came from
+another app raises the iOS 16+ "…would like to paste from…" alert; reading back what we just wrote
+ourselves does not. No path in `ClipboardTool` reads before it writes.
+
+### The two honest results
+
+| Situation | `aurelia.tool_result.result` | `deferred` |
+|---|---|---|
+| app in front, read-back matched | `Скопировано: <preview>` | absent |
+| backgrounded, the write did land anyway | `Скопировано: <preview>` | absent |
+| backgrounded, queued for the foreground | `Скопирую, как только откроешь приложение: <preview>` | `true` |
+| nothing to copy / write failed in front | `ok:false`, `error: nothing_to_copy` \| `pasteboard_write_failed` | — |
+
+`deferred:true` is only ever set on an `ok:true` whose effect lands later.
+
+### `aurelia.client_tool.applied` — client → server, once per queued effect
+
+Sent when the queued copy **finishes**: verified by read-back after the app came to the front, or
+(on `didBecomeActive`, the last chance) the final failure. Only while a session is open; with no
+session it is logged and kept in Settings → Debug → Phone tools, never buffered.
+
+```json
+{
+  "type": "aurelia.client_tool.applied",
+  "id": "c1",
+  "tool": "phone.copy_to_clipboard",
+  "ok": true,
+  "verifiedByReadback": true,
+  "stage": "active",
+  "queuedMs": 41230,
+  "appState": "active",
+  "chars": 42
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | the `aurelia.tool_call` id this completes. **Absent** (not null) when the copy came through the push-to-ask path, which has no wire id |
+| `tool` | always the `phone.*` wire name — `phone.copy_to_clipboard` today |
+| `ok` | the text is on the pasteboard now |
+| `verifiedByReadback` | `ok` was decided by reading the pasteboard back, not assumed. (Today `ok == verifiedByReadback`; the field is separate so a future "landed but unverifiable" path can say so) |
+| `stage` | `"foreground"` (`willEnterForeground`) \| `"active"` (`didBecomeActive`) \| `"manual"` |
+| `queuedMs` | how long the text waited |
+| `appState` | the app state at the moment of the re-apply |
+| `chars` | length of the copied text — never the text itself |
+
+**Server half (not implemented on the client side, AUR-845 stops here):** log the frame against the
+originating tool call, and let the brain say the landing out loud — e.g. «скопировано» on `ok:true`,
+and on `ok:false` tell the wearer the copy did not survive. A `deferred:true` result that never gets
+its `applied` frame means the wearer never opened the app: worth a nudge after a while.
+
+### `session.update.metadata.appState`
+
+The client re-declares its metadata whenever the app's foreground state changes during a call
+(`didBecomeActive` / `willResignActive` / `didEnterBackground` / `willEnterForeground`, deduped to
+real changes) — the same rail AUR-803b built for `tz` / `utcOffsetMin`:
+
+```json
+{ "type": "session.update",
+  "session": { "metadata": { "client": "openvision", "proto": "aurelia.v2", "route": "a2dp+phone-mic",
+                             "aec": true, "tz": "Europe/Amsterdam", "utcOffsetMin": 120,
+                             "appState": "background" } } }
+```
+
+`appState` is `"active"` | `"inactive"` | `"background"`. The brain needs it to read a `deferred`
+clipboard result without guessing: the phone is in the wearer's pocket, so the paste has **not**
+landed yet.
 
 ## Privacy
 
