@@ -24,6 +24,24 @@ esac
 log() { printf '\n▸ %s\n' "$*"; }
 SHA=$(git rev-parse --short HEAD)
 
+# AUR-845b — portal auth for `-allowProvisioningUpdates`. The app signs against the EXPLICIT App ID
+# (app.soulless.openvision, 4DUB6L4475) now that it carries entitlements, and fetching that profile
+# needs the developer portal. xcodebuild has no way in: with no Apple ID in Xcode's Accounts it
+# fails with "error: No Accounts: Add a new account in Accounts settings" and then falls back to a
+# CACHED profile — which is the wildcard, which carries no capabilities, so the build dies on the
+# wifi-info key and the error reads as if the portal work was never done. The App Store Connect API
+# key is the headless way in. Absent (fresh machine) we simply do not pass the flags: a cached
+# explicit profile can still satisfy the build, and if it cannot, the build error says so plainly.
+ASC_KEY=${ASC_KEY:-$HOME/.private_keys/AuthKey_6MU7DYSFH7.p8}
+ASC_KEY_ID=${ASC_KEY_ID:-6MU7DYSFH7}
+ASC_ISSUER_ID=${ASC_ISSUER_ID:-be177da0-1e8f-46af-bd33-f243f86f793a}
+AUTH=()
+if [[ -f $ASC_KEY ]]; then
+  AUTH=(-authenticationKeyPath "$ASC_KEY" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID")
+else
+  echo "  note: no ASC API key at $ASC_KEY — provisioning updates will use cached profiles only"
+fi
+
 # Reachability, two steps: (1) devicectl's JSON says the phone is listed + paired (its tunnelState
 # reads "disconnected" between commands — the tunnel is established on demand, so it is NOT the
 # reachability truth; measured 2026-08-21: "disconnected" in the list, then `install app` landed);
@@ -65,7 +83,8 @@ else
   log "xcodebuild build → id=$UDID (derivedData $DD)"
   set +e
   xcodebuild build -project OpenVision.xcodeproj -scheme OpenVision -destination "id=$UDID" -derivedDataPath "$DD" \
-    -allowProvisioningUpdates -skipPackagePluginValidation -skipMacroValidation 2>&1 | tee "$OTA/ship-build.log" | grep -E 'error:|\*\* BUILD'
+    -allowProvisioningUpdates ${AUTH[@]+"${AUTH[@]}"} -skipPackagePluginValidation -skipMacroValidation 2>&1 \
+    | tee "$OTA/ship-build.log" | grep -E 'error:|Provisioning Profile:|\*\* BUILD'
   rc=${PIPESTATUS[0]}; set -e
   if (( rc != 0 )); then
     echo "✗ device build failed (rc=$rc) — see $OTA/ship-build.log"
