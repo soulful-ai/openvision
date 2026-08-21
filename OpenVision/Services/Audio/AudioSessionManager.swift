@@ -471,27 +471,117 @@ final class AudioSessionManager {
                                callPaused: callPaused)
     }
 
-    /// Open a listen window. This first cut only SNAPSHOTS the rig and reports it — the
-    /// reconfiguration lands in the next commit; the observability has to come first so the next
-    /// field attempt says what it ran on either way.
+    /// The session a music fingerprint needs: `.playAndRecord` so playback survives, `.measurement`
+    /// because that is the ONE mode Apple documents as minimising input signal processing, and
+    /// deliberately WITHOUT two options the call sets:
+    ///   • `.allowBluetoothHFP` — HFP is a synchronous full-duplex SCO link; while it is up the
+    ///     session input runs at the link's 8 kHz (narrowband) or 16 kHz (wideband) rate, whichever
+    ///     port is preferred. Dropping it lets the built-in mic run at its own 48 kHz.
+    ///   • `.duckOthers` — the music may be coming out of this very phone. Ducking it is ducking
+    ///     the thing we are trying to recognise. `.mixWithOthers` instead.
+    private static let musicWindowOptions: AVAudioSession.CategoryOptions =
+        [.defaultToSpeaker, .allowBluetoothA2DP, .mixWithOthers]
+    private static let musicWindowSampleRate = 48_000.0
+
+    /// Open a music-capable capture window and hand back what it took, so it can be put back.
+    ///
+    /// THE TRADE-OFF, stated plainly: while the window is open the live call's own microphone is
+    /// deaf. It has to be. Voice processing can only be switched off with the engine stopped
+    /// (AVAudioIONode.h: "Voice processing can only be enabled or disabled when the engine is in a
+    /// stopped state"), and a running VPIO unit keeps the input device in speech mode for everyone
+    /// on the session — so there is no way to hold a `.voiceChat` capture open AND fingerprint
+    /// music through the same hardware. Six to twelve seconds of a deaf mic while the wearer is
+    /// pointing the phone at a song is the right side of that trade; a listen that can never match
+    /// is not. Her PLAYBACK is only interrupted for the window too, which is why the caller drains
+    /// the playout tail before opening it.
     @discardableResult
     func beginMusicWindow() -> MusicWindow {
+        // Set FIRST: the reconfiguration below fires route-change notifications, and they belong
+        // to the window, not to the call.
         musicWindowActive = true
         let window = MusicWindow(category: audioSession.category,
                                  mode: audioSession.mode,
                                  options: audioSession.categoryOptions,
                                  preferredInput: audioSession.preferredInput,
                                  sampleRate: audioSession.sampleRate,
-                                 enginePaused: false,
+                                 enginePaused: sharedEngine?.isRunning == true,
                                  voiceProcessingWas: voiceProcessingEnabled)
-        ovLog("[AudioSession] 🎵 music window open — \(routeInfo.description), mode \(audioSession.mode.rawValue), vp \(voiceProcessingEnabled ? "on" : "off")")
+
+        if let engine = sharedEngine, engine.isRunning {
+            engine.stop()
+            if voiceProcessingEnabled {
+                do {
+                    try engine.inputNode.setVoiceProcessingEnabled(false)
+                    voiceProcessingEnabled = false
+                } catch {
+                    ovLog("[AudioSession] 🎵 could not disable voice processing for the window: \(error)")
+                }
+            }
+        }
+
+        do {
+            try audioSession.setCategory(.playAndRecord, mode: .measurement, options: Self.musicWindowOptions)
+            try? audioSession.setPreferredSampleRate(Self.musicWindowSampleRate)
+            if let builtIn = audioSession.availableInputs?.first(where: { $0.portType == .builtInMic }) {
+                try? audioSession.setPreferredInput(builtIn)
+            } else {
+                ovLog("[AudioSession] 🎵 no built-in mic among the available inputs — listening on \(micLabel)")
+            }
+            try audioSession.setActive(true)
+        } catch {
+            ovLog("[AudioSession] 🎵 could not reconfigure for music capture: \(error)")
+        }
+
+        ovLog("[AudioSession] 🎵 music window open — \(routeInfo.description), mode \(audioSession.mode.rawValue), vp \(voiceProcessingEnabled ? "on" : "off"), call \(window.enginePaused ? "paused" : "idle")")
         return window
     }
 
-    /// Close the listen window and put the rig back.
+    /// Close the listen window: the exact category / mode / options / preferred input / rate go
+    /// back, then the call's engine comes back up with its voice processing, then the taps are
+    /// rebuilt. If the engine refuses to restart (the AUR-772 hazard — a VPIO unit that has not
+    /// finished releasing reports a 0 Hz input), fall back to a FRESH engine rather than leaving
+    /// the call deaf: a music-ID nicety must never be able to end a conversation.
     func endMusicWindow(_ window: MusicWindow) {
+        do {
+            try audioSession.setCategory(window.category, mode: window.mode, options: window.options)
+            try? audioSession.setPreferredSampleRate(window.sampleRate)
+            try? audioSession.setPreferredInput(window.preferredInput)
+            try audioSession.setActive(true)
+        } catch {
+            ovLog("[AudioSession] 🎵 could not restore the session after the window: \(error)")
+        }
+
+        if window.enginePaused {
+            var restored = false
+            if let engine = sharedEngine {
+                if window.voiceProcessingWas, !voiceProcessingEnabled {
+                    do {
+                        try engine.inputNode.setVoiceProcessingEnabled(true)
+                        voiceProcessingEnabled = true
+                    } catch {
+                        ovLog("[AudioSession] 🎵 could not re-enable voice processing: \(error)")
+                    }
+                }
+                do {
+                    engine.prepare()
+                    try engine.start()
+                    restored = engine.inputNode.outputFormat(forBus: 0).sampleRate > 0
+                } catch {
+                    ovLog("[AudioSession] 🎵 the call engine did not restart: \(error)")
+                }
+            }
+            if !restored {
+                ovLog("[AudioSession] 🎵 rebuilding the call engine from scratch after the window")
+                stopSharedEngine()
+                _ = try? startSharedEngine(voiceProcessing: window.voiceProcessingWas)
+            }
+        }
+
+        // Only now: the taps and the playback node reattach to the engine that is actually running,
+        // and the route the call reports is the call's own again.
         musicWindowActive = false
-        ovLog("[AudioSession] 🎵 music window closed — \(routeInfo.description)")
+        if window.enginePaused { onEngineConfigurationChange?() }
+        ovLog("[AudioSession] 🎵 music window closed — \(routeInfo.description), vp \(voiceProcessingEnabled ? "on" : "off")")
     }
 
     // MARK: - Route observers

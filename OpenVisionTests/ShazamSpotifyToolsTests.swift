@@ -1,4 +1,5 @@
 import XCTest
+import AVFoundation
 @testable import OpenVision
 
 /// AUR-793: Shazam → Spotify.
@@ -191,6 +192,70 @@ final class ShazamSpotifyToolsTests: XCTestCase {
             XCTAssertTrue(e.wireCode.hasPrefix("shazam_failed:202"), e.wireCode)
             XCTAssertTrue(e.wireCode.contains("mic=phone"), e.wireCode)
         } catch { XCTFail("wrong error: \(error)") }
+    }
+
+    // MARK: - AUR-793b: the music-capture window saves and restores the rig
+
+    /// The window must leave the session EXACTLY as it found it — a `phone.shazam` that quietly
+    /// changed the call's category or mode would break the conversation it interrupted.
+    func testMusicWindowRestoresTheSessionItFound() throws {
+        let session = AVAudioSession.sharedInstance()
+        let manager = AudioSessionManager.shared
+        // The rig the field failure ran on: a full-duplex call.
+        let callOptions: AVAudioSession.CategoryOptions = [.defaultToSpeaker, .allowBluetoothA2DP, .duckOthers]
+        try session.setCategory(.playAndRecord, mode: .voiceChat, options: callOptions)
+        // iOS adds `.mixWithOthers` of its own accord alongside `.duckOthers`, so the truth to
+        // restore is what the session REPORTS, not what we asked for.
+        let established = session.categoryOptions
+
+        let window = manager.beginMusicWindow()
+        XCTAssertTrue(manager.musicWindowActive)
+        XCTAssertEqual(window.category, .playAndRecord)
+        XCTAssertEqual(window.mode, .voiceChat, "the snapshot must remember the mode it displaced")
+        XCTAssertEqual(window.options, established)
+
+        // …and while it is open the capture is music-capable, not speech-shaped.
+        XCTAssertEqual(session.mode, .measurement, "voiceChat is a speech isolator — the listen needs measurement")
+        XCTAssertFalse(session.categoryOptions.contains(.duckOthers),
+                       "ducking the music is ducking the thing we are listening for")
+        XCTAssertFalse(session.categoryOptions.contains(.allowBluetoothHFP),
+                       "an HFP SCO link pins the input to 8/16 kHz — no fingerprint survives that")
+        XCTAssertTrue(session.categoryOptions.contains(.mixWithOthers))
+
+        manager.endMusicWindow(window)
+        XCTAssertFalse(manager.musicWindowActive)
+        XCTAssertEqual(session.category, .playAndRecord)
+        XCTAssertEqual(session.mode, .voiceChat, "the call's mode must come back")
+        XCTAssertEqual(session.categoryOptions, established, "the call's options must come back")
+    }
+
+    /// With no call up (push-to-ask, or the app just open) there is no engine to pause — the
+    /// window still opens, still restores, and says the call was never paused.
+    func testMusicWindowWithNoLiveCallPausesNothing() throws {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playback, mode: .default, options: [])
+        let manager = AudioSessionManager.shared
+        XCTAssertNil(manager.sharedEngine, "this test assumes no realtime rig is up")
+
+        let window = manager.beginMusicWindow()
+        XCTAssertFalse(window.enginePaused)
+        XCTAssertFalse(window.voiceProcessingWas)
+        manager.endMusicWindow(window)
+
+        XCTAssertEqual(session.category, .playback)
+        XCTAssertEqual(session.mode, .default)
+    }
+
+    /// The conditions read-out is built from the LISTEN's own tap, not from the session's wishes.
+    func testConditionsReportTheTapNotThePreferredValues() {
+        let c = AudioSessionManager.shared.musicCaptureConditions(sampleRate: 48_000,
+                                                                  voiceProcessing: false,
+                                                                  callPaused: true)
+        XCTAssertEqual(c.sampleRate, 48_000)
+        XCTAssertFalse(c.voiceProcessing)
+        XCTAssertTrue(c.callPaused)
+        XCTAssertTrue(c.wire.contains("call=paused"), c.wire)
+        XCTAssertFalse(c.category.hasPrefix("AVAudioSessionCategory"), "the wire wants the short name: \(c.category)")
     }
 
     // MARK: - Spotify: the unconfigured state (no client id in the build)
