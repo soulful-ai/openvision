@@ -6,11 +6,20 @@
 #   AWAY mode  — phone not reachable (away / locked / unavailable) or the install fails → fall back to
 #                scripts/ota-release.sh (archive → GCS signed URLs → Telegram link, runbook §11).
 # Usage: scripts/ship-client.sh [--wifi | --ota]     (no flag = auto-detect; --wifi/--ota force a mode)
-# Env: SHIP_UDID (default Anton's iPhone — NEVER Margo's) · SHIP_DD (.dd) · SHIP_SKIP_BUILD=1 (reuse .dd app)
+# Env: SHIP_UDID (default Anton's iPhone; set it explicitly to target Margo's) · SHIP_DD (.dd) ·
+#      SHIP_SKIP_BUILD=1 (reuse .dd app)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
-UDID=${SHIP_UDID:-00008140-000535203682801C}     # Anton's iPhone 16e; Margo's phone is never a target here
+UDID=${SHIP_UDID:-00008140-000535203682801C}     # default: Anton's iPhone 16e. Margo's phone is never the
+# DEFAULT, but SHIP_UDID targets it deliberately when asked (2026-08-21, 2026-08-22). Name the phone we
+# are ACTUALLY shipping to: the messages used to say "Anton's iPhone" whatever SHIP_UDID said, which
+# reads as a wrong-device install in the log long after the fact.
+case $UDID in
+  00008140-000535203682801C) WHO="Anton's iPhone" ;;
+  00008120-000268AE22EBC01E) WHO="Margo's iPhone" ;;
+  *)                         WHO="$UDID" ;;
+esac
 DD=${SHIP_DD:-$ROOT/.dd}
 APP=$DD/Build/Products/Debug-iphoneos/OpenVision.app
 OTA=$ROOT/.ota; mkdir -p "$OTA"
@@ -69,7 +78,7 @@ away() { log "AWAY mode: OTA link via scripts/ota-release.sh ($1)"; exec bash "$
 
 if [[ $MODE == ota ]]; then away "--ota forced"; fi
 
-log "probe $UDID (Anton's iPhone)"
+log "probe $UDID ($WHO)"
 if reachable; then REACH=1; else REACH=0; fi
 if (( ! REACH )); then
   [[ $MODE == wifi ]] && { echo "✗ --wifi forced but the phone is not reachable (away / locked / not on this network)"; exit 1; }
@@ -99,7 +108,7 @@ set +e
 timeout 180 xcrun devicectl device install app --device "$UDID" "$APP" 2>&1 | tee "$OTA/ship-install.log" | grep -E 'App installed:|ERROR|error'
 rc=${PIPESTATUS[0]}; set -e
 if (( rc == 0 )) && grep -q 'App installed:' "$OTA/ship-install.log"; then
-  log "HOME mode: installed over Wi-Fi ($SHA → Anton's iPhone)"
+  log "HOME mode: installed over Wi-Fi ($SHA → $WHO)"
   exit 0
 fi
 echo "✗ install failed (rc=$rc; locked / unreachable / trust) — see $OTA/ship-install.log"
